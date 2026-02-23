@@ -351,7 +351,7 @@ export default function HomePage() {
               시스템 준비 완료
             </h2>
             <p className="text-[var(--color-text-secondary)]">
-              스마트 체크아웃 시스템에 오신 것을 환영합니다
+              장보GO에 오신 걸 환영합니다
             </p>
           </div>
         </div>
@@ -363,15 +363,19 @@ export default function HomePage() {
         <div className="bg-white rounded-2xl p-8 border border-[var(--color-border)] shadow-sm hover:shadow-md transition-shadow">
           <div className="flex items-start gap-4 mb-6">
             <div className="w-14 h-14 rounded-2xl bg-[var(--color-primary-light)] flex items-center justify-center flex-shrink-0">
-              <span className="text-3xl">🛒</span>
+              <img
+                src="/jangbogo.svg"
+                alt="장보GO 아이콘"
+                className="w-10 h-10 rounded-xl object-cover"
+              />
             </div>
             <div className="flex-1">
               <h3 className="text-xl font-bold text-[var(--color-text)] mb-2">
-                체크아웃
+                장보GO
               </h3>
               <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-                실시간 카메라 피드를 통해 상품을 인식하고 장바구니를 자동으로 구성합니다.
-                정확한 인식을 위해 ROI 영역을 설정할 수 있습니다.
+                카메라에 상품을 보여주면 장바구니에 자동으로 담겨요.
+                담긴 상품을 확인한 뒤 바로 결제할 수 있어요.
               </p>
             </div>
           </div>
@@ -379,7 +383,7 @@ export default function HomePage() {
             to="/checkout"
             className="block w-full py-3 px-6 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white font-medium rounded-xl text-center transition-colors"
           >
-            체크아웃 시작
+            장보GO 시작
           </Link>
         </div>
 
