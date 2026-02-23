@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "../stores/authStore";
-import { getDashboardStats } from "../api/client";
+import { getDashboardStats } from "../api/purchases";
 
 export default function HomePage() {
   const { isAdmin, token } = useAuthStore();

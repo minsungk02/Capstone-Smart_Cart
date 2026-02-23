@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "../stores/authStore";
-import { getMyPurchases } from "../api/client";
+import { getMyPurchases } from "../api/purchases";
 
 export default function MyPage() {
   const { user, token } = useAuthStore();

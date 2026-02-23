@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listProducts, addProduct } from "../api/client";
+import { listProducts, addProduct } from "../api/products";
 
 export default function ProductsPage() {
   const queryClient = useQueryClient();

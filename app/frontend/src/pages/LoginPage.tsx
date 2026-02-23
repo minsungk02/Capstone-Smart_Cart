@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, Link } from "react-router-dom";
-import { login } from "../api/client";
+import { login } from "../api/auth";
 import { useAuthStore } from "../stores/authStore";
 
 export default function LoginPage() {

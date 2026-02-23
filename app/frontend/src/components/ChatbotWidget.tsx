@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getBilling, getChatbotSuggestions, queryChatbot } from "../api/client";
+import { getChatbotSuggestions, queryChatbot } from "../api/chatbot";
+import { getBilling } from "../api/checkout";
 import { useSessionStore } from "../stores/sessionStore";
 
 type Sender = "user" | "assistant";

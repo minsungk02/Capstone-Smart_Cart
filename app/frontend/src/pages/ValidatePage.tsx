@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSessionStore } from "../stores/sessionStore";
 import { useAuthStore } from "../stores/authStore";
-import { updateBilling, confirmBilling, createPurchase, getBilling } from "../api/client";
+import { confirmBilling, getBilling, updateBilling } from "../api/checkout";
+import { createPurchase } from "../api/purchases";
 
 export default function ValidatePage() {
   const navigate = useNavigate();
