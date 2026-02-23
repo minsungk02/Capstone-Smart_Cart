@@ -58,6 +58,7 @@ const getDefaultDesktopPos = () => ({
 
 export default function ChatbotWidget() {
   const sessionId = useSessionStore((s) => s.sessionId);
+  const createSession = useSessionStore((s) => s.createSession);
   const billingItems = useSessionStore((s) => s.billingItems);
   const setBilling = useSessionStore((s) => s.setBilling);
   const setBillingState = useSessionStore((s) => s.setBillingState);
@@ -68,13 +69,17 @@ export default function ChatbotWidget() {
   const [listening, setListening] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [choices, setChoices] = useState<ChatbotChoice[]>([]);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "initial",
       sender: "assistant",
-      text: "안녕하세요! 장바구니 금액, 가격, 상품 정보를 물어보세요.",
+      text: "안녕하세요. 장바구니 금액이나 상품 정보를 물어보세요.",
     },
   ]);
+
+  const creatingSessionRef = useRef(false);
 
   // --- Drag state ---
   const [isMobileView, setIsMobileView] = useState(() => isMobileWidth(window.innerWidth));
@@ -86,6 +91,26 @@ export default function ChatbotWidget() {
   const hasMoved = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const ensureSession = useCallback(async () => {
+    if (sessionId) return sessionId;
+    if (creatingSessionRef.current) return null;
+
+    creatingSessionRef.current = true;
+    setCreatingSession(true);
+    setSessionError(null);
+
+    try {
+      const newId = await createSession();
+      return newId;
+    } catch {
+      setSessionError("세션 생성에 실패했습니다. 잠시 후 다시 시도해주세요.");
+      return null;
+    } finally {
+      creatingSessionRef.current = false;
+      setCreatingSession(false);
+    }
+  }, [sessionId, createSession]);
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     if (isMobileView) return;
@@ -140,6 +165,12 @@ export default function ChatbotWidget() {
   const hasCartItems = useMemo(() => Object.keys(billingItems).length > 0, [billingItems]);
 
   useEffect(() => {
+    if (open) {
+      ensureSession();
+    }
+  }, [open, ensureSession]);
+
+  useEffect(() => {
     if (!open) return;
     getChatbotSuggestions(sessionId || undefined)
       .then((res) => setSuggestions(res.suggestions || []))
@@ -166,14 +197,19 @@ export default function ChatbotWidget() {
     setLoading(true);
 
     try {
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        activeSessionId = await ensureSession();
+      }
+
       const res = await queryChatbot({
         question: trimmed,
-        session_id: sessionId || undefined,
+        session_id: activeSessionId || undefined,
       });
 
-      if (res.cart_update?.billing_items && sessionId) {
+      if (res.cart_update?.billing_items && activeSessionId) {
         try {
-          const latest = await getBilling(sessionId);
+          const latest = await getBilling(activeSessionId);
           setBillingState(latest);
         } catch {
           setBilling(res.cart_update.billing_items);
@@ -198,7 +234,7 @@ export default function ChatbotWidget() {
         {
           id: `${Date.now()}-error`,
           sender: "assistant",
-          text: "답변 생성 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.",
+          text: "응답 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
         },
       ]);
     } finally {
@@ -223,7 +259,7 @@ export default function ChatbotWidget() {
         {
           id: `${Date.now()}-voice-unsupported`,
           sender: "assistant",
-          text: "이 브라우저는 음성 인식을 지원하지 않아요. 텍스트로 질문해주세요.",
+          text: "이 브라우저는 음성 인식을 지원하지 않습니다.",
         },
       ]);
       return;
@@ -267,14 +303,14 @@ export default function ChatbotWidget() {
             ? "w-16 h-16"
             : "w-12 h-12 cursor-grab active:cursor-grabbing touch-none"
         }`}
-        aria-label="챗봇 열기"
+        aria-label={open ? "챗봇 닫기" : "챗봇 열기"}
         onPointerDown={onPointerDown}
         onClick={() => {
           if (!hasMoved.current) setOpen((v) => !v);
         }}
       >
         <span className={isMobileView ? "text-2xl" : "text-lg"}>
-          {open ? "✕" : "💬"}
+          {open ? "✕" : "🤖"}
         </span>
       </button>
 
@@ -287,9 +323,15 @@ export default function ChatbotWidget() {
           <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-primary-light)]">
             <p className="text-sm font-semibold text-[var(--color-text)]">스마트 챗봇</p>
             <p className="text-xs text-[var(--color-text-secondary)]">
-              {hasCartItems ? "장바구니 기반 답변 준비됨" : "장바구니가 비어있어요"}
+              {hasCartItems ? "장바구니 기반 답변 제공" : "장바구니가 비어 있습니다"}
             </p>
           </div>
+
+          {sessionError && (
+            <div className="px-4 py-2 text-xs text-[var(--color-danger)] bg-white border-b border-[var(--color-border)]">
+              {sessionError}
+            </div>
+          )}
 
           <div ref={scrollRef} className="h-80 overflow-y-auto p-3 space-y-2 bg-[var(--color-bg)]">
             {messages.map((msg) => (
@@ -306,7 +348,7 @@ export default function ChatbotWidget() {
             ))}
             {loading && (
               <div className="inline-flex px-3 py-2 rounded-xl text-sm bg-white text-[var(--color-text-secondary)] border border-[var(--color-border)]">
-                답변 생성 중...
+                응답 생성 중...
               </div>
             )}
           </div>
@@ -348,10 +390,12 @@ export default function ChatbotWidget() {
             <button
               type="button"
               onClick={handleVoiceInput}
-              className={`w-9 h-9 rounded-full border border-[var(--color-border)] flex items-center justify-center ${
-                listening ? "bg-[var(--color-primary-light)] text-[var(--color-primary)]" : "bg-white text-[var(--color-text)]"
+              className={`w-10 h-9 rounded-lg border border-[var(--color-border)] flex items-center justify-center ${
+                listening
+                  ? "bg-[var(--color-primary-light)] text-[var(--color-primary)]"
+                  : "bg-white text-[var(--color-text)]"
               }`}
-              aria-label="음성 인식"
+              aria-label="음성 입력"
             >
               🎤
             </button>
@@ -361,7 +405,7 @@ export default function ChatbotWidget() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") sendQuestion(input);
               }}
-              placeholder="질문을 입력하세요"
+              placeholder={creatingSession ? "세션 준비 중..." : "질문을 입력해주세요"}
               className="flex-1 h-9 px-3 rounded-lg border border-[var(--color-border)] bg-white text-sm outline-none focus:border-[var(--color-primary)]"
             />
             <button
