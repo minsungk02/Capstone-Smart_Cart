@@ -72,3 +72,7 @@ export async function getDashboardStats(token: string, periodDays?: number): Pro
     today_revenue: data.today_revenue ?? 0,
   };
 }
+
+export function getPopularProducts(token: string, limit = 5): Promise<PopularProduct[]> {
+  return request<PopularProduct[]>(`/purchases/popular?limit=${limit}`, { token });
+}

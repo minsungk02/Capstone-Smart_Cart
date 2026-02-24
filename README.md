@@ -346,6 +346,16 @@ cd app
 # DATABASE_URL=mysql+pymysql://ebrcs_app:ebrcs_pass@127.0.0.1:3307/item_db
 ```
 
+#### Django 사용자용 매핑 (makemigrations / migrate와의 차이)
+
+- 이 프로젝트는 Django ORM이 아니라 SQLAlchemy 기반입니다.
+- `makemigrations`에 해당하는 자동 파일 생성 단계는 없습니다.
+- `migrate`에 해당하는 단계는 `cd app && ./setup_db.sh` 입니다.
+- 모델 변경 시에는 아래를 함께 수정해야 합니다:
+  - `app/backend/models.py` (ORM 모델)
+  - `app/backend/db_bootstrap.py` (DB bootstrap SQL)
+- 서버 실행 시(`./run_web.sh`, `./run_web_production.sh`) DB check(`setup_db.sh --check`)를 먼저 수행하며, 필요하면 bootstrap을 자동 재시도합니다.
+
 #### ✅ 가격 DB 협업 파이프라인 체크리스트
 
 - [ ] `app/setup_db`로 스키마 준비 (`users`, `purchase_history`, `products`, `product_prices`)

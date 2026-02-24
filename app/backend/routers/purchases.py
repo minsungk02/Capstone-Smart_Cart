@@ -65,6 +65,40 @@ class DashboardStats(BaseModel):
     today_revenue: int
 
 
+def _aggregate_product_counts(db: Session) -> dict[str, int]:
+    """Aggregate product counts from purchase_history.items JSON."""
+    product_counts: dict[str, int] = {}
+    all_purchases = db.query(models.PurchaseHistory.items).all()
+
+    for purchase in all_purchases:
+        items = purchase.items if isinstance(purchase.items, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                count = int(item.get("count", 0))
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0:
+                continue
+            product_counts[name] = product_counts.get(name, 0) + count
+
+    return product_counts
+
+
+def _top_popular_products(product_counts: dict[str, int], limit: int = 5) -> list[dict]:
+    safe_limit = max(1, min(limit, 20))
+    return [
+        {"name": name, "total_count": count}
+        for name, count in sorted(product_counts.items(), key=lambda x: x[1], reverse=True)[
+            :safe_limit
+        ]
+    ]
+
+
 @router.get("/my", response_model=List[PurchaseResponse])
 def get_my_purchases(
     current_user: Annotated[models.User, Depends(get_current_user)],
@@ -123,6 +157,18 @@ def get_all_purchases(
         }
         for p in purchases
     ]
+
+
+@router.get("/popular", response_model=List[PopularProduct])
+def get_popular_products(
+    current_user: Annotated[models.User, Depends(get_current_user)],
+    db: Session = Depends(get_db),
+    limit: int = 5,
+):
+    """Get popular products for authenticated users (used by user home popup)."""
+    _ = current_user  # Auth required; role does not matter.
+    product_counts = _aggregate_product_counts(db)
+    return _top_popular_products(product_counts, limit=limit)
 
 
 @router.post("", response_model=PurchaseResponse)
@@ -217,23 +263,9 @@ def get_dashboard_stats(
     )
 
     # Total products sold and popular products
-    all_purchases = db.query(models.PurchaseHistory).all()
-
-    product_counts = {}
-    total_products_sold = 0
-
-    for purchase in all_purchases:
-        for item in purchase.items:
-            name = item["name"]
-            count = item["count"]
-            product_counts[name] = product_counts.get(name, 0) + count
-            total_products_sold += count
-
-    # Popular products TOP 5
-    popular_products = [
-        {"name": name, "total_count": count}
-        for name, count in sorted(product_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    ]
+    product_counts = _aggregate_product_counts(db)
+    total_products_sold = sum(product_counts.values())
+    popular_products = _top_popular_products(product_counts, limit=5)
 
     # Recent purchases (last 5)
     recent_purchases_db = (

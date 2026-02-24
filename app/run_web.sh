@@ -2,7 +2,7 @@
 # Run backend (FastAPI) and frontend (Vite dev) concurrently for local development.
 # Usage: ./run_web.sh
 
-set -e
+set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$APP_DIR")"
@@ -10,7 +10,10 @@ PROJECT_ROOT="$(dirname "$APP_DIR")"
 # Load .env if exists
 if [ -f "$PROJECT_ROOT/.env" ]; then
     echo "Loading environment from .env..."
-    export $(grep -v '^#' "$PROJECT_ROOT/.env" | xargs)
+    set -a
+    # shellcheck disable=SC1090
+    source "$PROJECT_ROOT/.env"
+    set +a
 fi
 
 # Activate backend virtual environment
@@ -24,6 +27,13 @@ fi
 
 # Fix OpenMP duplicate library issue on macOS
 export KMP_DUPLICATE_LIB_OK=TRUE
+
+# Ensure DB connection/schema is ready before starting web servers.
+echo "Checking DB connectivity/schema..."
+if ! "$APP_DIR/setup_db.sh" --check; then
+    echo "DB check failed. Attempting bootstrap..."
+    "$APP_DIR/setup_db.sh"
+fi
 
 echo "=== EBRCS Web App (Local Dev) ==="
 echo "Backend : http://localhost:8000"

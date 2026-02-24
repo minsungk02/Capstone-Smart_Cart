@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError } from "../api/base";
 import { useAuthStore } from "../stores/authStore";
 import { deletePurchase, getMyPurchases } from "../api/purchases";
 
@@ -24,6 +25,9 @@ export default function MyPage() {
       await queryClient.invalidateQueries({ queryKey: ["purchases", "my"] });
     },
     onError: (error) => {
+      if (error instanceof ApiError && error.status === 401) {
+        return;
+      }
       alert((error as Error).message || "구매 내역 삭제 중 오류가 발생했습니다.");
     },
     onSettled: () => {

@@ -3,13 +3,14 @@ import { useAuthStore } from "../stores/authStore";
 import { getAllPurchases } from "../api/purchases";
 
 export default function AdminPurchasesPage() {
-  const { token } = useAuthStore();
+  const { token, isAdmin } = useAuthStore();
+  const isAdminUser = isAdmin();
   const formatAmount = (value: number) => `₩${value.toLocaleString("ko-KR")}`;
 
   const { data: purchases, isLoading } = useQuery({
     queryKey: ["purchases", "all"],
     queryFn: () => getAllPurchases(token!),
-    enabled: !!token,
+    enabled: isAdminUser && !!token,
   });
 
   return (

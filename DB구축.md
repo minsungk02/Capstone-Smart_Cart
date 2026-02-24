@@ -7,6 +7,12 @@
 - `db/seeds/price_seed_latest.sql.gz`만 전달받으면
 - 로컬 Docker MySQL + 로컬 웹앱으로 동일한 가격 매칭 흐름 재현
 
+## Django 사용자 참고
+
+- Django `makemigrations`처럼 마이그레이션 파일을 자동 생성하지 않습니다.
+- 이 저장소에서 `migrate` 역할은 `cd app && ./setup_db.sh`입니다.
+- 모델 스키마를 바꿀 때는 `app/backend/models.py`와 `app/backend/db_bootstrap.py`를 함께 수정해야 합니다.
+
 ## 사전 준비
 
 - Git

@@ -30,6 +30,7 @@ export default function App() {
   const { pathname } = useLocation();
   const isCheckoutPage = pathname === "/checkout";
   const isAuthPage = pathname === "/login" || pathname === "/signup";
+  const isAdminRoute = pathname.startsWith("/admin");
 
   const { user, clearAuth, isAuthenticated, isAdmin } = useAuthStore();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -65,6 +66,11 @@ export default function App() {
   // Require authentication for all other pages
   if (!isAuthenticated()) {
     return <Navigate to="/login" replace />;
+  }
+
+  // Block direct access to admin routes for non-admin users.
+  if (isAdminRoute && !isAdmin()) {
+    return <Navigate to="/" replace />;
   }
 
   // Select menu based on role

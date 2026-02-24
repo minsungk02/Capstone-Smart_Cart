@@ -1,8 +1,20 @@
-﻿export type RequestOptions = RequestInit & {
+import { useAuthStore } from "../stores/authStore";
+
+export type RequestOptions = RequestInit & {
   token?: string;
 };
 
 const API_BASE = (import.meta as { env?: Record<string, string> }).env?.VITE_API_BASE || "/api";
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 function buildUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) {
@@ -32,6 +44,14 @@ async function parseError(res: Response): Promise<string> {
   }
 }
 
+function handleUnauthorized(token?: string): void {
+  // Only clear auth when this was an authenticated request.
+  if (!token) return;
+  const { token: currentToken, user, clearAuth } = useAuthStore.getState();
+  if (!currentToken && !user) return;
+  clearAuth();
+}
+
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { token, headers, ...rest } = options;
   const finalHeaders = new Headers(headers || {});
@@ -49,7 +69,10 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   if (!res.ok) {
     const message = await parseError(res);
-    throw new Error(message);
+    if (res.status === 401) {
+      handleUnauthorized(token);
+    }
+    throw new ApiError(res.status, message);
   }
 
   const contentType = res.headers.get("content-type") || "";

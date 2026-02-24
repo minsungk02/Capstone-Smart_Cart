@@ -31,7 +31,8 @@ router = APIRouter(tags=["products"])
 DINO_WEIGHT = 0.7
 CLIP_WEIGHT = 0.3
 MIN_IMAGES = 3
-MAX_IMAGES = 5
+# Allow extra samples for better robustness while keeping an upper bound.
+MAX_IMAGES = 10
 
 
 def _pil_to_bgr(img: Image.Image) -> np.ndarray:
@@ -94,7 +95,7 @@ async def add_product(
     images: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
-    """Register a new product with 3-5 images.
+    """Register a new product with 3-10 images.
 
     Generates embeddings, appends to DB files, and updates the FAISS index.
     """
@@ -106,7 +107,8 @@ async def add_product(
         raise HTTPException(status_code=422, detail="Price must be positive")
     if len(images) < MIN_IMAGES or len(images) > MAX_IMAGES:
         raise HTTPException(
-            status_code=422, detail=f"Provide {MIN_IMAGES}-{MAX_IMAGES} images"
+            status_code=422,
+            detail=f"Provide at least {MIN_IMAGES} images (up to {MAX_IMAGES})",
         )
 
     bundle = app_state.model_bundle

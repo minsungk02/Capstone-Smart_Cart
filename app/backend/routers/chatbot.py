@@ -526,8 +526,13 @@ def _answer_question(
             )
         if resp.status_code == 503:
             return "LLM 모델이 아직 로딩 중입니다. 잠시 후 다시 시도해 주세요."
-        if resp.status_code in {401, 403}:
-            return "HF_TOKEN 인증에 실패했습니다. 토큰 권한/만료 상태를 확인해 주세요."
+        if resp.status_code == 401:
+            return "HF_TOKEN 인증에 실패했습니다. 토큰 값/만료 상태를 확인해 주세요."
+        if resp.status_code == 403:
+            return (
+                "HF 토큰은 인식되었지만 Inference Providers 호출 권한이 없습니다. "
+                "HuggingFace 토큰 권한에서 Inference Providers 권한을 활성화해 주세요."
+            )
         if resp.status_code == 402:
             return "현재 선택한 모델은 과금이 필요할 수 있습니다. 다른 무료 모델로 변경해 주세요."
 

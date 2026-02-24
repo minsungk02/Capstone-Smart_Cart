@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "../stores/authStore";
-import { getDashboardStats } from "../api/purchases";
+import { getDashboardStats, getPopularProducts } from "../api/purchases";
 
 const PERIOD_OPTIONS = [7, 30, 90] as const;
 type PeriodDays = (typeof PERIOD_OPTIONS)[number];
@@ -33,17 +33,30 @@ function buildOrderTicks(maxValue: number): number[] {
 
 export default function HomePage() {
   const { isAdmin, token } = useAuthStore();
+  const isAdminUser = isAdmin();
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7);
 
   // Fetch dashboard stats for admin
   const { data: stats, isLoading } = useQuery({
-    queryKey: ["dashboard", "stats", periodDays],
+    queryKey: ["dashboard", "stats", periodDays, token],
     queryFn: () => getDashboardStats(token!, periodDays),
-    enabled: isAdmin() && !!token,
+    enabled: isAdminUser && !!token,
   });
 
+  // Fetch popular TOP5 for user home section (non-admin only)
+  const { data: userPopularProducts = [] } = useQuery({
+    queryKey: ["popular-products", "user-popup", token],
+    queryFn: () => getPopularProducts(token!, 5),
+    enabled: !isAdminUser && !!token,
+  });
+
+  const maxUserPopularCount = useMemo(
+    () => Math.max(1, ...userPopularProducts.map((p) => p.total_count)),
+    [userPopularProducts]
+  );
+
   // Admin Dashboard
-  if (isAdmin()) {
+  if (isAdminUser) {
     const dailyStats = stats?.daily_stats ?? [];
     const maxOrderCount = Math.max(1, ...dailyStats.map((row) => row.purchase_count));
     const maxPopularCount = Math.max(1, ...(stats?.popular_products ?? []).map((p) => p.total_count));
@@ -325,36 +338,66 @@ export default function HomePage() {
     );
   }
 
-  // User HomePage (기존 UI)
+  // User HomePage
   return (
     <div className="p-4 md:p-6 lg:p-8 max-w-6xl mx-auto space-y-4 md:space-y-6 lg:space-y-8">
-      {/* System Ready Banner */}
+      {/* Real-time Best */}
       <div className="bg-white rounded-2xl p-6 border border-[var(--color-border)] shadow-sm">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-full bg-[var(--color-success-light)] flex items-center justify-center flex-shrink-0">
-            <svg
-              className="w-7 h-7 text-[var(--color-success)]"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2.5}
-                d="M5 13l4 4L19 7"
-              />
-            </svg>
-          </div>
+        <div className="flex items-start justify-between gap-3 mb-4">
           <div>
-            <h2 className="text-2xl font-bold text-[var(--color-text)] mb-2">
-              시스템 준비 완료
+            <h2 className="text-2xl font-bold text-[var(--color-text)] mb-1">
+              실시간 베스트
             </h2>
-            <p className="text-[var(--color-text-secondary)]">
-              장보GO에 오신 걸 환영합니다
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              지금 가장 많이 담긴 인기 상품 TOP 5
             </p>
           </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-orange-50 text-orange-700 text-xs font-semibold">
+            LIVE TOP5
+          </span>
         </div>
+
+        {userPopularProducts.length > 0 ? (
+          <div className="flex gap-3 overflow-x-auto pb-1 snap-x snap-mandatory">
+            {userPopularProducts.map((product, index) => {
+              const ratio = Math.max(
+                10,
+                Math.round((product.total_count / maxUserPopularCount) * 100)
+              );
+              return (
+                <div
+                  key={product.name}
+                  className="min-w-[220px] sm:min-w-[240px] max-w-[260px] shrink-0 snap-start rounded-xl border border-[var(--color-border)] bg-white p-4"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="inline-flex w-7 h-7 items-center justify-center rounded-full bg-orange-100 text-orange-700 text-xs font-bold">
+                      {index + 1}
+                    </span>
+                    <span className="text-xs font-semibold text-[var(--color-primary)]">
+                      {product.total_count}개
+                    </span>
+                  </div>
+                  <div className="w-12 h-12 rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)] flex items-center justify-center text-lg font-bold mb-3">
+                    {(product.name || "?").slice(0, 1)}
+                  </div>
+                  <p className="text-sm font-semibold text-[var(--color-text)] break-words line-clamp-2 min-h-[2.6rem]">
+                    {product.name}
+                  </p>
+                  <div className="mt-3 h-2 rounded-full bg-gray-100 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400"
+                      style={{ width: `${ratio}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="h-24 rounded-xl border border-dashed border-[var(--color-border)] flex items-center justify-center text-sm text-[var(--color-text-secondary)]">
+            아직 인기 상품 집계 데이터가 없습니다.
+          </div>
+        )}
       </div>
 
       {/* CTA Cards */}

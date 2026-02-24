@@ -1,240 +1,226 @@
-#!/bin/bash
-# EBRCS 웹앱 프로덕션 실행 스크립트 (AWS EC2용)
+#!/usr/bin/env bash
+# EBRCS production runner.
+# Prints only high-level status to console; detailed output goes to logs/.
 
-set -e
+set -euo pipefail
+
 MIN_NODE_VERSION="20.19.0"
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$APP_DIR")"
+LOG_DIR="$APP_DIR/logs"
+RUNNER_LOG="$LOG_DIR/run_web_production.log"
+BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+FRONTEND_BUILD_LOG="$LOG_DIR/frontend_build.log"
+
+timestamp() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
+
+log_line() {
+    local level="$1"
+    shift
+    printf '%s [%s] %s\n' "$(timestamp)" "$level" "$*" >> "$RUNNER_LOG"
+}
+
+say() {
+    printf '%s\n' "$*"
+    log_line INFO "$*"
+}
+
+warn() {
+    printf 'WARN: %s\n' "$*" >&2
+    log_line WARN "$*"
+}
+
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    log_line ERROR "$*"
+    exit 1
+}
 
 version_lt() {
     [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" != "$1" ]
 }
 
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(dirname "$APP_DIR")"
+require_command() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd"
+}
 
-echo "🚀 EBRCS 웹앱 프로덕션 모드 실행"
-echo "================================"
-echo ""
+tail_for_error() {
+    local file="$1"
+    local lines="${2:-40}"
+    if [ -f "$file" ]; then
+        echo "----- $file (last ${lines} lines) -----" >&2
+        tail -n "$lines" "$file" >&2 || true
+        echo "--------------------------------------" >&2
+    fi
+}
 
-# 가상환경 활성화 확인
-if [ ! -d "$APP_DIR/backend/.venv" ]; then
-    echo "❌ 가상환경이 없습니다. setup_venv.sh를 먼저 실행하세요."
-    exit 1
-fi
+wait_for_http() {
+    local pid="$1"
+    local url="$2"
+    local retries="$3"
+    local delay_seconds="$4"
 
-# 가상환경 활성화
-source "$APP_DIR/backend/.venv/bin/activate"
+    for _ in $(seq 1 "$retries"); do
+        if ! ps -p "$pid" >/dev/null 2>&1; then
+            return 1
+        fi
+        if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$delay_seconds"
+    done
+    return 1
+}
 
-# nvm 로드 (Node.js)
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+stop_stale_processes() {
+    log_line INFO "Stopping stale backend/frontend processes if present."
 
-if ! command -v node >/dev/null 2>&1; then
-    echo "❌ Node.js를 찾을 수 없습니다. setup_venv.sh를 먼저 실행하세요."
-    exit 1
-fi
-if ! command -v lsof >/dev/null 2>&1; then
-    echo "❌ lsof를 찾을 수 없습니다. (Ubuntu: sudo apt-get install -y lsof)"
-    exit 1
-fi
-NODE_VERSION="$(node -v | sed 's/^v//')"
-if version_lt "$MIN_NODE_VERSION" "$NODE_VERSION"; then
-    echo "❌ Node.js 버전이 낮습니다. 현재: v${NODE_VERSION}, 필요: v${MIN_NODE_VERSION}+"
-    exit 1
-fi
+    if [ -f "$LOG_DIR/backend.pid" ]; then
+        local old_backend_pid
+        old_backend_pid="$(cat "$LOG_DIR/backend.pid" 2>/dev/null || true)"
+        [ -n "$old_backend_pid" ] && kill "$old_backend_pid" 2>/dev/null || true
+    fi
 
-# 환경 변수 확인
-if [ ! -f "$PROJECT_ROOT/.env" ]; then
-    echo "❌ .env 파일이 없습니다."
-    exit 1
-fi
+    if [ -f "$LOG_DIR/frontend.pid" ]; then
+        local old_frontend_pid
+        old_frontend_pid="$(cat "$LOG_DIR/frontend.pid" 2>/dev/null || true)"
+        [ -n "$old_frontend_pid" ] && kill "$old_frontend_pid" 2>/dev/null || true
+    fi
 
-# .env 로드
-set -a
-# shellcheck disable=SC1090
-source "$PROJECT_ROOT/.env"
-set +a
+    pkill -f "uvicorn backend.main:app" >/dev/null 2>&1 || true
+    pkill -f "vite preview" >/dev/null 2>&1 || true
+    sleep 2
 
-# SessionManager is in-memory (process-local). Keep single worker by default.
-UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
-if ! [[ "$UVICORN_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "⚠️  UVICORN_WORKERS 값이 올바르지 않아 1로 설정합니다: $UVICORN_WORKERS"
-    UVICORN_WORKERS="1"
-fi
-if [ "$UVICORN_WORKERS" -gt 1 ]; then
-    echo "⚠️  UVICORN_WORKERS=$UVICORN_WORKERS (세션/웹소켓은 인메모리라 멀티 워커에서 불안정할 수 있음)"
-fi
+    local port_pid
+    port_pid="$(lsof -ti:8000 || true)"
+    [ -n "$port_pid" ] && kill -9 "$port_pid" >/dev/null 2>&1 || true
 
-# 로그 디렉토리 생성
-mkdir -p "$APP_DIR/logs"
+    port_pid="$(lsof -ti:5173 || true)"
+    [ -n "$port_pid" ] && kill -9 "$port_pid" >/dev/null 2>&1 || true
 
-# 기존 프로세스 종료
-echo "🔄 기존 프로세스 종료 중..."
-
-# PID 파일 기반 종료
-if [ -f "$APP_DIR/logs/backend.pid" ]; then
-    BACKEND_PID=$(cat "$APP_DIR/logs/backend.pid")
-    kill $BACKEND_PID 2>/dev/null || true
-    echo "  - Backend PID $BACKEND_PID 종료 시도"
-fi
-
-if [ -f "$APP_DIR/logs/frontend.pid" ]; then
-    FRONTEND_PID=$(cat "$APP_DIR/logs/frontend.pid")
-    kill $FRONTEND_PID 2>/dev/null || true
-    echo "  - Frontend PID $FRONTEND_PID 종료 시도"
-fi
-
-# pkill로 남은 프로세스 종료
-pkill -f "uvicorn backend.main:app" || true
-pkill -f "vite preview" || true
-sleep 2
-
-# 포트 8000을 사용 중인 프로세스 강제 종료
-PORT_PID=$(lsof -ti:8000 || true)
-if [ -n "$PORT_PID" ]; then
-    echo "  - 포트 8000 점유 프로세스 (PID: $PORT_PID) 강제 종료"
-    kill -9 $PORT_PID || true
     sleep 1
-fi
 
-# 포트 5173을 사용 중인 프로세스 강제 종료
-PORT_PID=$(lsof -ti:5173 || true)
-if [ -n "$PORT_PID" ]; then
-    echo "  - 포트 5173 점유 프로세스 (PID: $PORT_PID) 강제 종료"
-    kill -9 $PORT_PID || true
-    sleep 1
-fi
-
-# 최종 확인
-if lsof -i:8000 >/dev/null 2>&1; then
-    echo "❌ 포트 8000을 해제할 수 없습니다. 수동으로 확인하세요:"
-    echo "   lsof -i:8000"
-    exit 1
-fi
-
-echo "  ✓ 기존 프로세스 종료 완료"
-
-# Frontend 빌드
-echo "🔨 Frontend 빌드 중..."
-cd "$APP_DIR/frontend"
-npm run build
-cd "$APP_DIR"
-
-# Backend 실행 (프로덕션 모드)
-echo "🚀 Backend 시작 중..."
-cd "$APP_DIR"
-export PYTHONPATH="$APP_DIR:$PROJECT_ROOT"
-nohup uvicorn backend.main:app \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --workers "$UVICORN_WORKERS" \
-    > "$APP_DIR/logs/backend.log" 2>&1 &
-
-BACKEND_PID=$!
-echo "  ✓ Backend PID: $BACKEND_PID"
-
-# Frontend 실행 (Vite preview)
-echo "🌐 Frontend 시작 중..."
-cd "$APP_DIR/frontend"
-nohup npx vite preview \
-    --host 0.0.0.0 \
-    --port 5173 \
-    > "$APP_DIR/logs/frontend.log" 2>&1 &
-
-FRONTEND_PID=$!
-cd "$APP_DIR"
-echo "  ✓ Frontend PID: $FRONTEND_PID"
-
-# PID 저장
-echo $BACKEND_PID > "$APP_DIR/logs/backend.pid"
-echo $FRONTEND_PID > "$APP_DIR/logs/frontend.pid"
-
-# 준비 상태 확인 (모델 로딩으로 backend startup이 오래 걸릴 수 있음)
-echo "⏳ 서비스 준비 상태 확인 중..."
-BACKEND_READY="false"
-FRONTEND_READY="false"
-
-for _ in $(seq 1 180); do
-    if ! ps -p $BACKEND_PID >/dev/null 2>&1; then
-        break
+    if lsof -i:8000 >/dev/null 2>&1; then
+        die "Port 8000 is still in use after cleanup."
     fi
-    if curl -sS --max-time 2 http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
-        BACKEND_READY="true"
-        break
+    if lsof -i:5173 >/dev/null 2>&1; then
+        die "Port 5173 is still in use after cleanup."
     fi
-    sleep 1
-done
 
-for _ in $(seq 1 30); do
-    if ! ps -p $FRONTEND_PID >/dev/null 2>&1; then
-        break
-    fi
-    if curl -sS --max-time 2 http://127.0.0.1:5173 >/dev/null 2>&1; then
-        FRONTEND_READY="true"
-        break
-    fi
-    sleep 1
-done
+    return 0
+}
 
-PUBLIC_IP="$(curl -s ifconfig.me || true)"
-if [ -z "$PUBLIC_IP" ]; then
-    PUBLIC_IP="YOUR_EC2_IP"
-fi
+main() {
+    mkdir -p "$LOG_DIR"
+    : > "$RUNNER_LOG"
+    log_line INFO "run_web_production.sh started (app_dir=$APP_DIR)."
 
-# HTTPS 프록시 상태 확인 (Nginx)
-HTTPS_READY="false"
-if command -v curl >/dev/null 2>&1; then
-    if curl -k -s --max-time 3 https://127.0.0.1/ >/dev/null 2>&1; then
-        HTTPS_READY="true"
-    fi
-fi
+    [ -d "$APP_DIR/backend/.venv" ] || die "Backend virtualenv not found. Run ./setup_venv.sh first."
+    source "$APP_DIR/backend/.venv/bin/activate"
 
-# 인증서 호스트 불일치 안내 (EC2 재시작으로 공인 IP가 바뀐 경우)
-CERT_HINT=""
-if [ -f /etc/nginx/ssl/ebrcs.crt ] && [ "$PUBLIC_IP" != "YOUR_EC2_IP" ]; then
-    CERT_INFO="$(openssl x509 -in /etc/nginx/ssl/ebrcs.crt -noout -subject -ext subjectAltName 2>/dev/null || true)"
-    if ! echo "$CERT_INFO" | grep -q "$PUBLIC_IP"; then
-        CERT_HINT="⚠️  현재 SSL 인증서와 공인 IP가 다를 수 있습니다. (권장: sudo ./setup_https.sh ${PUBLIC_IP})"
-    fi
-fi
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-# 상태 확인
-echo ""
-echo "================================"
-if ps -p $BACKEND_PID > /dev/null && ps -p $FRONTEND_PID > /dev/null && [ "$BACKEND_READY" = "true" ] && [ "$FRONTEND_READY" = "true" ]; then
-    echo "✅ 웹앱 실행 성공!"
-    echo ""
-    echo "🌐 접속 주소 (카메라 사용: HTTPS 권장):"
-    echo "  웹앱(HTTPS): https://${PUBLIC_IP}"
-    echo "  API(HTTPS): https://${PUBLIC_IP}/api/health"
-    echo ""
-    if [ "$HTTPS_READY" != "true" ]; then
-        echo "⚠️  현재 HTTPS 프록시(Nginx) 응답이 없습니다."
-        echo "   sudo ./setup_https.sh ${PUBLIC_IP}"
-        echo ""
+    require_command node
+    require_command lsof
+    require_command curl
+    require_command uvicorn
+    require_command npm
+
+    local node_version
+    node_version="$(node -v | sed 's/^v//')"
+    if version_lt "$MIN_NODE_VERSION" "$node_version"; then
+        die "Node.js v${MIN_NODE_VERSION}+ required (current: v${node_version})."
     fi
-    if [ -n "$CERT_HINT" ]; then
-        echo "$CERT_HINT"
-        echo ""
+
+    [ -f "$PROJECT_ROOT/.env" ] || die ".env not found at $PROJECT_ROOT/.env"
+    set -a
+    # shellcheck disable=SC1090
+    source "$PROJECT_ROOT/.env"
+    set +a
+
+    say "Starting EBRCS production stack..."
+
+    log_line INFO "Checking DB schema."
+    if ! "$APP_DIR/setup_db.sh" --check >> "$RUNNER_LOG" 2>&1; then
+        warn "DB check failed. Running bootstrap..."
+        "$APP_DIR/setup_db.sh" >> "$RUNNER_LOG" 2>&1 || die "DB bootstrap failed. See $RUNNER_LOG"
     fi
-    echo "🌐 직접 포트 접속 (디버깅용, 카메라 비권장):"
-    echo "  Frontend: http://${PUBLIC_IP}:5173"
-    echo "  Backend:  http://${PUBLIC_IP}:8000/api/health"
-    echo ""
-    echo "📝 내부 서비스 (localhost only):"
-    echo "  Backend: http://localhost:8000"
-    echo "  Frontend: http://localhost:5173"
-    echo ""
-    echo "📊 로그 확인:"
-    echo "  Backend: tail -f app/logs/backend.log"
-    echo "  Frontend: tail -f app/logs/frontend.log"
-    echo ""
-    echo "🛑 종료 방법:"
-    echo "  cd app && ./stop_web.sh"
-else
-    echo "❌ 실행 실패. 로그를 확인하세요:"
-    echo "  Backend ready: $BACKEND_READY"
-    echo "  Frontend ready: $FRONTEND_READY"
-    echo "  cat app/logs/backend.log"
-    echo "  cat app/logs/frontend.log"
-    exit 1
-fi
+    say "DB schema ready."
+
+    local uvicorn_workers
+    uvicorn_workers="${UVICORN_WORKERS:-1}"
+    if ! [[ "$uvicorn_workers" =~ ^[1-9][0-9]*$ ]]; then
+        warn "Invalid UVICORN_WORKERS=$uvicorn_workers. Using 1."
+        uvicorn_workers="1"
+    fi
+    if [ "$uvicorn_workers" -gt 1 ]; then
+        warn "UVICORN_WORKERS=$uvicorn_workers may break in-memory session behavior."
+    fi
+
+    stop_stale_processes
+
+    say "Building frontend..."
+    if ! (cd "$APP_DIR/frontend" && npm run build > "$FRONTEND_BUILD_LOG" 2>&1); then
+        tail_for_error "$FRONTEND_BUILD_LOG"
+        die "Frontend build failed. See $FRONTEND_BUILD_LOG"
+    fi
+    log_line INFO "Frontend build completed."
+
+    export PYTHONPATH="$APP_DIR:$PROJECT_ROOT"
+
+    nohup uvicorn backend.main:app \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --workers "$uvicorn_workers" \
+        > "$BACKEND_LOG" 2>&1 &
+    local backend_pid=$!
+    echo "$backend_pid" > "$LOG_DIR/backend.pid"
+    log_line INFO "Started backend pid=$backend_pid"
+
+    cd "$APP_DIR/frontend"
+    nohup npx vite preview \
+        --host 0.0.0.0 \
+        --port 5173 \
+        --strictPort \
+        > "$FRONTEND_LOG" 2>&1 &
+    local frontend_pid=$!
+    cd "$APP_DIR"
+    echo "$frontend_pid" > "$LOG_DIR/frontend.pid"
+    log_line INFO "Started frontend pid=$frontend_pid"
+
+    say "Waiting for services..."
+    if ! wait_for_http "$backend_pid" "http://127.0.0.1:8000/api/health" 180 1; then
+        tail_for_error "$BACKEND_LOG"
+        die "Backend startup failed. See $BACKEND_LOG"
+    fi
+
+    if ! wait_for_http "$frontend_pid" "http://127.0.0.1:5173" 60 1; then
+        tail_for_error "$FRONTEND_LOG"
+        die "Frontend startup failed. See $FRONTEND_LOG"
+    fi
+
+    local public_ip
+    public_ip="$(curl -s ifconfig.me 2>/dev/null || true)"
+    [ -n "$public_ip" ] || public_ip="YOUR_EC2_IP"
+
+    if ! curl -k -s --max-time 3 https://127.0.0.1/ >/dev/null 2>&1; then
+        warn "Nginx HTTPS check failed on https://127.0.0.1/."
+    fi
+
+    say "EBRCS started successfully."
+    say "  Web: https://${public_ip}"
+    say "  API: https://${public_ip}/api/health"
+    say "  Logs:"
+    say "    - $RUNNER_LOG"
+    say "    - $BACKEND_LOG"
+    say "    - $FRONTEND_LOG"
+    say "Stop: cd $APP_DIR && ./stop_web.sh"
+}
+
+main "$@"

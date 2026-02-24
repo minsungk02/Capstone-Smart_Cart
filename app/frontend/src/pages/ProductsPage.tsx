@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { addProduct, deleteProduct, listProducts } from "../api/products";
 
 const MIN_IMAGES = 3;
-const MAX_IMAGES = 5;
+const RECOMMENDED_MAX_IMAGES = 5;
+const STABLE_MAX_IMAGES = 10;
 
 interface CapturedImage {
   id: string;
@@ -41,7 +42,7 @@ export default function ProductsPage() {
     name.trim().length > 0 &&
     hasValidPrice &&
     images.length >= MIN_IMAGES &&
-    images.length <= MAX_IMAGES;
+    images.length <= STABLE_MAX_IMAGES;
 
   const { data, isLoading } = useQuery({
     queryKey: ["products"],
@@ -138,8 +139,8 @@ export default function ProductsPage() {
 
   const captureImage = async () => {
     if (!videoRef.current) return;
-    if (images.length >= MAX_IMAGES) {
-      setCameraError(`최대 ${MAX_IMAGES}장까지 촬영할 수 있습니다.`);
+    if (images.length >= STABLE_MAX_IMAGES) {
+      setCameraError(`안정성을 위해 최대 ${STABLE_MAX_IMAGES}장까지 촬영할 수 있습니다.`);
       return;
     }
 
@@ -215,7 +216,17 @@ export default function ProductsPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <h2 className="text-xl font-bold">상품 등록 (카메라)</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-bold">상품 등록 (카메라)</h2>
+        <a
+          href="/api/db-viewer"
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium border border-[var(--color-border)] bg-white hover:bg-[var(--color-bg-muted)]"
+        >
+          DB UI 열기
+        </a>
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <div className="space-y-6">
@@ -280,7 +291,7 @@ export default function ProductsPage() {
                 전체 삭제
               </button>
               <span className="text-sm text-[var(--color-text-muted)]">
-                {captured.length}/{MAX_IMAGES}장 (최소 {MIN_IMAGES}장)
+                {captured.length}장 (최소 {MIN_IMAGES}장, 권장 최대 {RECOMMENDED_MAX_IMAGES}장)
               </span>
             </div>
 
@@ -382,7 +393,7 @@ export default function ProductsPage() {
 
             {!canSubmit && (
               <p className="text-xs text-[var(--color-text-muted)]">
-                상품 정보 입력 후 {MIN_IMAGES}~{MAX_IMAGES}장을 촬영해주세요.
+                상품 정보 입력 후 최소 {MIN_IMAGES}장을 촬영해주세요.
               </p>
             )}
 
