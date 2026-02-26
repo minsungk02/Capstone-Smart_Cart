@@ -22,12 +22,13 @@ Import EBRCS full DB seed into MySQL.
 Options:
   --seed <path>     Input seed file (.sql or .sql.gz).
   --append          Keep existing data and append imported rows.
-                    Default: truncates all 5 tables before importing.
+                    Default: truncates all 7 tables before importing.
   --dry-run         Print resolved DB target and command without executing.
   -h, --help        Show this help.
 
 Tables affected (child → parent truncate order):
-  purchase_history, users, product_discounts, product_prices, products
+  purchase_history, users, category_corner_map, store_corners,
+  product_discounts, product_prices, products
 EOF
 }
 
@@ -166,10 +167,11 @@ required_count="$(
     MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" -Nse \
     "SELECT COUNT(*) FROM information_schema.tables
      WHERE table_schema='$DB_NAME'
-     AND table_name IN ('products','product_prices','product_discounts','users','purchase_history');"
+     AND table_name IN ('products','product_prices','product_discounts',
+                        'store_corners','category_corner_map','users','purchase_history');"
 )"
 
-if [ "${required_count:-0}" -lt 5 ]; then
+if [ "${required_count:-0}" -lt 7 ]; then
     echo "❌ Required tables are missing in $DB_NAME."
     echo "   Run: cd app && ./setup_db.sh"
     exit 1
@@ -182,6 +184,8 @@ if [ "$APPEND_MODE" != "true" ]; then
         "SET FOREIGN_KEY_CHECKS=0;
          TRUNCATE TABLE purchase_history;
          TRUNCATE TABLE users;
+         TRUNCATE TABLE category_corner_map;
+         TRUNCATE TABLE store_corners;
          TRUNCATE TABLE product_discounts;
          TRUNCATE TABLE product_prices;
          TRUNCATE TABLE products;
@@ -200,8 +204,10 @@ echo "✅ Full seed imported."
 echo ""
 echo "Row counts after import:"
 MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$DB_NAME" -e \
-    "SELECT 'products'          AS tbl, COUNT(*) AS cnt FROM products
-     UNION ALL SELECT 'product_prices',   COUNT(*) FROM product_prices
-     UNION ALL SELECT 'product_discounts',COUNT(*) FROM product_discounts
-     UNION ALL SELECT 'users',            COUNT(*) FROM users
-     UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history;"
+    "SELECT 'products'           AS tbl, COUNT(*) AS cnt FROM products
+     UNION ALL SELECT 'product_prices',    COUNT(*) FROM product_prices
+     UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
+     UNION ALL SELECT 'store_corners',     COUNT(*) FROM store_corners
+     UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
+     UNION ALL SELECT 'users',             COUNT(*) FROM users
+     UNION ALL SELECT 'purchase_history',  COUNT(*) FROM purchase_history;"

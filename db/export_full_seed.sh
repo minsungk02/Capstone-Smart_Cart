@@ -172,6 +172,11 @@ fi
     # products → product_prices → product_discounts (FK dependency order)
     MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" products product_prices product_discounts
 
+    # store_corners → category_corner_map (FK dependency order)
+    # setup_db.sh의 _seed_corner_mappings()는 products가 비어있을 때 실행되므로
+    # 시드 파일에 직접 포함해야 로컬에서도 코너 매핑이 정상 동작함
+    MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" store_corners category_corner_map
+
     # users (optional filter)
     if [ -n "$USERS_WHERE" ]; then
         MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" --where="$USERS_WHERE" "$DB_NAME" users
@@ -206,5 +211,7 @@ MYSQL_PWD="$DB_PASSWORD" mysql \
     "SELECT 'products' AS tbl, COUNT(*) AS cnt FROM products
      UNION ALL SELECT 'product_prices', COUNT(*) FROM product_prices
      UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
+     UNION ALL SELECT 'store_corners', COUNT(*) FROM store_corners
+     UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
      UNION ALL SELECT 'users (exported)', COUNT(*) FROM users$([ -n "$USERS_WHERE" ] && echo " WHERE $USERS_WHERE")
      UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history$([ -n "$USERS_WHERE" ] && echo " WHERE user_id IN (SELECT id FROM users WHERE $USERS_WHERE)");"
