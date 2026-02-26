@@ -477,6 +477,30 @@ _CATALOG_STOPWORDS = {
 }
 _DISCOUNT_QUERY_TOKENS = ("할인", "세일", "할인율", "할인가")
 _PRICE_QUERY_TOKENS = ("가격", "비싼", "저렴", "최고가", "최저가", "금액", "얼마")
+_LOCATION_QUERY_TOKENS = (
+    "위치",
+    "어디",
+    "코너",
+    "몇번",
+    "몇 번",
+    "어느 코너",
+    "어느코너",
+    "어디에",
+    "location",
+    "aisle",
+)
+_LOCATION_TERM_STOPWORDS = {
+    "위치",
+    "어디",
+    "어디야",
+    "어디에",
+    "코너",
+    "몇번",
+    "몇",
+    "번",
+    "location",
+    "aisle",
+}
 _NUTRITION_QUERY_TOKENS = (
     "영양",
     "영양소",
@@ -831,6 +855,42 @@ def _catalog_summary(
     return summary
 
 
+def _category_corner_snapshot(db: Session) -> dict[str, dict[str, Any]]:
+    map_columns = _table_columns(db, "category_corner_map")
+    corner_columns = _table_columns(db, "store_corners")
+    if not map_columns or not corner_columns:
+        return {}
+    if not {"category_l", "corner_id"}.issubset(set(map_columns)):
+        return {}
+    if not {"id", "corner_no"}.issubset(set(corner_columns)):
+        return {}
+
+    try:
+        rows = db.execute(
+            text(
+                "SELECT m.category_l, c.corner_no, c.corner_name "
+                "FROM category_corner_map m "
+                "JOIN store_corners c ON c.id = m.corner_id "
+                "ORDER BY c.corner_no ASC, m.category_l ASC"
+            )
+        ).mappings().all()
+    except SQLAlchemyError:
+        return {}
+
+    snapshot: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        category = str(row.get("category_l") or "").strip()
+        corner_no = row.get("corner_no")
+        if not category or corner_no is None:
+            continue
+        corner_name = str(row.get("corner_name") or "").strip()
+        snapshot[category] = {
+            "corner_no": int(corner_no),
+            "corner_name": corner_name or f"{int(corner_no)}번 코너",
+        }
+    return snapshot
+
+
 def _discount_snapshot(
     db: Session,
     question: str,
@@ -1096,6 +1156,7 @@ def _build_catalog_context(db: Session, question: str) -> dict[str, Any]:
         "summary": _catalog_summary(db, product_columns, discount_columns),
         "search_terms": terms,
         "matched_products": matched_rows[:_MAX_CATALOG_MATCH_ROWS],
+        "corner_map": _category_corner_snapshot(db),
     }
 
     discount_rows = _discount_snapshot(db, question, product_columns, price_columns, discount_columns)
@@ -1476,6 +1537,125 @@ def _product_match_score(product_row: dict[str, Any], terms: list[str]) -> int:
     return score
 
 
+def _is_location_query(question: str) -> bool:
+    lowered = (question or "").lower()
+    return any(token in lowered for token in _LOCATION_QUERY_TOKENS)
+
+
+def _format_corner_label(corner_no: Any, corner_name: Any) -> str | None:
+    try:
+        no = int(corner_no)
+    except (TypeError, ValueError):
+        return None
+    default_name = f"{no}번 코너"
+    cleaned_name = str(corner_name or "").strip()
+    if cleaned_name and cleaned_name != default_name:
+        return f"{default_name} ({cleaned_name})"
+    return default_name
+
+
+def _answer_corner_location_direct(question: str, catalog_context: dict[str, Any] | None) -> str | None:
+    if not _is_location_query(question):
+        return None
+    if not catalog_context or not catalog_context.get("available"):
+        return "상품 위치 정보는 현재 DB에서 확인되지 않습니다."
+
+    raw_corner_map = catalog_context.get("corner_map")
+    if not isinstance(raw_corner_map, dict) or not raw_corner_map:
+        return "카테고리-코너 매핑이 아직 등록되지 않았습니다."
+
+    corner_map: dict[str, dict[str, Any]] = {
+        str(k).strip(): v
+        for k, v in raw_corner_map.items()
+        if str(k).strip() and isinstance(v, dict)
+    }
+    if not corner_map:
+        return "카테고리-코너 매핑이 아직 등록되지 않았습니다."
+
+    normalized_question = _normalize_query_token(question)
+    for category, info in corner_map.items():
+        normalized_category = _normalize_query_token(category)
+        if not normalized_category or normalized_category not in normalized_question:
+            continue
+        corner_label = _format_corner_label(info.get("corner_no"), info.get("corner_name"))
+        if corner_label:
+            return f"{category} 카테고리는 {corner_label}에 있습니다."
+
+    raw_products = catalog_context.get("matched_products")
+    if not isinstance(raw_products, list):
+        return "질문하신 상품을 찾지 못했습니다."
+
+    product_rows = [row for row in raw_products if isinstance(row, dict)]
+    if not product_rows:
+        return "질문하신 상품을 찾지 못했습니다."
+
+    raw_terms = catalog_context.get("search_terms")
+    terms = raw_terms if isinstance(raw_terms, list) else _extract_catalog_terms(question, limit=6)
+    terms = [
+        str(term).strip()
+        for term in terms
+        if _normalize_query_token(str(term)) not in _LOCATION_TERM_STOPWORDS
+    ]
+    scored_products = sorted(
+        [
+            (row, _product_match_score(row, terms))
+            for row in product_rows
+        ],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    resolved: list[str] = []
+    seen_keys: set[str] = set()
+    for row, score in scored_products:
+        if terms and score <= 0:
+            continue
+        category = str(
+            row.get("category_l")
+            or row.get("category")
+            or row.get("category_m")
+            or row.get("category_s")
+            or ""
+        ).strip()
+        if not category:
+            continue
+
+        mapping = corner_map.get(category)
+        if not mapping:
+            normalized_category = _normalize_query_token(category)
+            for key, value in corner_map.items():
+                if _normalize_query_token(key) == normalized_category:
+                    mapping = value
+                    category = key
+                    break
+        if not mapping:
+            continue
+
+        corner_label = _format_corner_label(mapping.get("corner_no"), mapping.get("corner_name"))
+        if not corner_label:
+            continue
+
+        item_no = str(row.get("item_no") or "").strip()
+        product_name = str(row.get("product_name") or item_no or "해당 상품").strip()
+        dedup_key = item_no or product_name
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+        resolved.append(f"{product_name}: {corner_label} (카테고리: {category})")
+        if len(resolved) >= 3:
+            break
+
+    if not resolved:
+        return "해당 상품의 코너 정보가 아직 등록되지 않았습니다."
+
+    if len(resolved) == 1:
+        first = resolved[0]
+        product_part, right = first.split(": ", 1)
+        return f"{product_part}은(는) {right}에 있습니다."
+
+    return "확인된 상품 위치입니다.\n- " + "\n- ".join(resolved)
+
+
 def _answer_nutrition_direct(question: str, catalog_context: dict[str, Any] | None) -> str | None:
     if not any(token in question for token in _NUTRITION_QUERY_TOKENS):
         return None
@@ -1583,6 +1763,9 @@ def _answer_question(
     q = question.strip()
     if not q:
         return "질문을 입력해 주세요. 예: '총 금액 얼마야?'"
+    direct_location = _answer_corner_location_direct(q, catalog_context)
+    if direct_location:
+        return direct_location
     direct_nutrition = _answer_nutrition_direct(q, catalog_context)
     if direct_nutrition:
         return direct_nutrition
@@ -1611,6 +1794,7 @@ def _answer_question(
     catalog_discount_text = "할인 스냅샷 없음"
     catalog_price_text = "가격 스냅샷 없음"
     catalog_nutrition_text = "영양 스냅샷 없음"
+    catalog_corner_text = "코너 매핑 정보 없음"
 
     if catalog_context and catalog_context.get("available"):
         catalog_schema_text = _json_for_prompt(catalog_context.get("schema") or {})
@@ -1619,6 +1803,7 @@ def _answer_question(
         catalog_discount_text = _json_for_prompt(catalog_context.get("discount_snapshot") or [])
         catalog_price_text = _json_for_prompt(catalog_context.get("price_snapshot") or {})
         catalog_nutrition_text = _json_for_prompt(catalog_context.get("nutrition_snapshot") or {})
+        catalog_corner_text = _json_for_prompt(catalog_context.get("corner_map") or {})
 
     prompt = f"""
 아래는 사용자의 장바구니 정보와 카탈로그 DB 스냅샷입니다.
@@ -1646,6 +1831,9 @@ def _answer_question(
 
 영양 스냅샷:
 {catalog_nutrition_text}
+
+카테고리-코너 매핑:
+{catalog_corner_text}
 
 사용자 질문:
 {q}
@@ -1745,6 +1933,7 @@ async def get_chatbot_suggestions(session_id: str | None = None):
     suggestions = [
         "과자 중에서 할인율이 제일 큰 상품이 뭐야?",
         "가장 많이 담긴 상품은 뭐야?",
+        "코카콜라 위치가 어디야?",
     ]
 
     if session_id:
