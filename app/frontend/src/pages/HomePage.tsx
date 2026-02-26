@@ -141,8 +141,8 @@ export default function HomePage() {
           </div>
         ) : stats ? (
           <>
-            <div className="bg-white rounded-2xl p-5 md:p-6 border border-[var(--color-border)] shadow-sm">
-              <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+            <div className="relative bg-white rounded-2xl p-5 md:p-6 border border-[var(--color-border)] shadow-sm">
+              <div className="relative z-10 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                 <div>
                   <h2 className="text-xl md:text-2xl font-bold text-[var(--color-text)]">
                     최근 {periodDays}일 매출/주문 추이
@@ -177,7 +177,7 @@ export default function HomePage() {
 
               {dailyStats.length > 0 ? (
                 <>
-                  <div className="mt-6 overflow-x-auto pb-2">
+                  <div className="mt-6 overflow-x-auto pb-2 pointer-events-none">
                     <div style={{ minWidth: `${chartMinWidth}px` }}>
                       <div className="flex items-stretch gap-2">
                         <div className="w-10 shrink-0 h-72 relative">
