@@ -177,7 +177,7 @@ export default function HomePage() {
 
               {dailyStats.length > 0 ? (
                 <>
-                  <div className="mt-6 overflow-x-auto pb-2 pointer-events-none">
+                  <div className="mt-6 overflow-x-auto pb-2">
                     <div style={{ minWidth: `${chartMinWidth}px` }}>
                       <div className="flex items-stretch gap-2">
                         <div className="w-10 shrink-0 h-72 relative">

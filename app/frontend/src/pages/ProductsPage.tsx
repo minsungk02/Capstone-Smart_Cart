@@ -525,9 +525,6 @@ export default function ProductsPage() {
                   <p className="text-xs text-[var(--color-text-muted)]">상품번호: {p.item_no}</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="text-[var(--color-text-muted)]">
-                    {p.embedding_count} embeddings
-                  </span>
                   <button
                     className="px-2 py-1 rounded bg-[var(--color-danger)] text-white text-xs"
                     onClick={() => setConfirmDelete({ itemNo: p.item_no, name: p.name })}
@@ -539,11 +536,6 @@ export default function ProductsPage() {
               </li>
             ))}
           </ul>
-        )}
-        {data && (
-          <p className="text-xs text-[var(--color-text-muted)] mt-3">
-            Total embeddings: {data.total_embeddings}
-          </p>
         )}
       </div>
 
