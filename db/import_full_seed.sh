@@ -60,8 +60,19 @@ if [ ! -f "$SEED_FILE" ]; then
     echo "❌ Seed file not found: $SEED_FILE"; exit 1
 fi
 
-if ! command -v mysql >/dev/null 2>&1; then
-    echo "❌ mysql client not found. Install MySQL client first."; exit 1
+# ── Resolve mysql client: local binary or docker exec fallback ────────────────
+USE_DOCKER_MYSQL="false"
+if command -v mysql >/dev/null 2>&1; then
+    : # local mysql available
+elif docker inspect ebrcs-local-mysql >/dev/null 2>&1 && \
+     [ "$(docker inspect -f '{{.State.Running}}' ebrcs-local-mysql 2>/dev/null)" = "true" ]; then
+    USE_DOCKER_MYSQL="true"
+    echo "ℹ️  Local mysql client not found — using docker exec on ebrcs-local-mysql."
+else
+    echo "❌ mysql client not found and Docker container 'ebrcs-local-mysql' is not running."
+    echo "   Option 1: brew install mysql-client && export PATH=\"\$(brew --prefix mysql-client)/bin:\$PATH\""
+    echo "   Option 2: start Docker MySQL first with ./db/start_local_mysql.sh"
+    exit 1
 fi
 
 if command -v python >/dev/null 2>&1; then
@@ -132,12 +143,11 @@ while IFS= read -r line; do
     [ -n "$line" ] && export "$line"
 done <<< "$parse_output"
 
-mysql_cmd=(
-    mysql
-    "--host=$DB_HOST"
-    "--port=$DB_PORT"
-    "--user=$DB_USER"
-)
+if [ "$USE_DOCKER_MYSQL" = "true" ]; then
+    mysql_cmd=(docker exec -i ebrcs-local-mysql mysql "-u$DB_USER" "-p$DB_PASSWORD")
+else
+    mysql_cmd=(mysql "--host=$DB_HOST" "--port=$DB_PORT" "--user=$DB_USER")
+fi
 
 echo "Resolved target DB: mysql://$DB_USER@${DB_HOST}:${DB_PORT}/$DB_NAME"
 echo "Seed file: $SEED_FILE"
@@ -158,13 +168,22 @@ if [ "$DRY_RUN" = "true" ]; then
     exit 0
 fi
 
+# ── Helper: run mysql command (handles local vs docker exec) ──────────────────
+run_mysql() {
+    if [ "$USE_DOCKER_MYSQL" = "true" ]; then
+        "${mysql_cmd[@]}" "$@"
+    else
+        MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$@"
+    fi
+}
+
 # ── Ensure DB exists ──────────────────────────────────────────────────────────
-MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" -e \
+run_mysql -e \
     "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # ── Check schema is present ───────────────────────────────────────────────────
 required_count="$(
-    MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" -Nse \
+    run_mysql -Nse \
     "SELECT COUNT(*) FROM information_schema.tables
      WHERE table_schema='$DB_NAME'
      AND table_name IN ('products','product_prices','product_discounts',
@@ -180,7 +199,7 @@ fi
 # ── Optionally truncate (FK-safe order: child → parent) ───────────────────────
 if [ "$APPEND_MODE" != "true" ]; then
     echo "Truncating tables..."
-    MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$DB_NAME" -e \
+    run_mysql "$DB_NAME" -e \
         "SET FOREIGN_KEY_CHECKS=0;
          TRUNCATE TABLE purchase_history;
          TRUNCATE TABLE users;
@@ -195,15 +214,15 @@ fi
 # ── Import seed ───────────────────────────────────────────────────────────────
 echo "Importing seed data..."
 if [[ "$SEED_FILE" == *.gz ]]; then
-    gzip -dc "$SEED_FILE" | MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$DB_NAME"
+    gzip -dc "$SEED_FILE" | run_mysql "$DB_NAME"
 else
-    MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$DB_NAME" < "$SEED_FILE"
+    run_mysql "$DB_NAME" < "$SEED_FILE"
 fi
 
 echo "✅ Full seed imported."
 echo ""
 echo "Row counts after import:"
-MYSQL_PWD="$DB_PASSWORD" "${mysql_cmd[@]}" "$DB_NAME" -e \
+run_mysql "$DB_NAME" -e \
     "SELECT 'products'           AS tbl, COUNT(*) AS cnt FROM products
      UNION ALL SELECT 'product_prices',    COUNT(*) FROM product_prices
      UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts

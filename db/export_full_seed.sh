@@ -59,8 +59,19 @@ else
     echo "❌ python/python3 not found."; exit 1
 fi
 
-if ! command -v mysqldump >/dev/null 2>&1; then
-    echo "❌ mysqldump not found. Install MySQL client first."; exit 1
+# ── Resolve mysqldump: local binary or docker exec fallback ───────────────────
+USE_DOCKER_DUMP="false"
+if command -v mysqldump >/dev/null 2>&1; then
+    : # local mysqldump available
+elif docker inspect ebrcs-local-mysql >/dev/null 2>&1 && \
+     [ "$(docker inspect -f '{{.State.Running}}' ebrcs-local-mysql 2>/dev/null)" = "true" ]; then
+    USE_DOCKER_DUMP="true"
+    echo "ℹ️  Local mysqldump not found — using docker exec on ebrcs-local-mysql."
+else
+    echo "❌ mysqldump not found and Docker container 'ebrcs-local-mysql' is not running."
+    echo "   Option 1: brew install mysql-client && export PATH=\"\$(brew --prefix mysql-client)/bin:\$PATH\""
+    echo "   Option 2: start Docker MySQL first with ./db/start_local_mysql.sh"
+    exit 1
 fi
 
 if [[ "$OUTPUT_FILE" != /* ]]; then
@@ -126,18 +137,31 @@ done <<< "$parse_output"
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # ── Build mysqldump base args ─────────────────────────────────────────────────
-dump_base=(
-    mysqldump
-    "--host=$DB_HOST"
-    "--port=$DB_PORT"
-    "--user=$DB_USER"
-    "--single-transaction"
-    "--set-gtid-purged=OFF"
-    "--no-tablespaces"
-    "--skip-comments"
-    "--no-create-info"
-    "--skip-triggers"
-)
+if [ "$USE_DOCKER_DUMP" = "true" ]; then
+    dump_base=(
+        docker exec ebrcs-local-mysql mysqldump
+        "-u$DB_USER" "-p$DB_PASSWORD"
+        "--single-transaction"
+        "--set-gtid-purged=OFF"
+        "--no-tablespaces"
+        "--skip-comments"
+        "--no-create-info"
+        "--skip-triggers"
+    )
+else
+    dump_base=(
+        mysqldump
+        "--host=$DB_HOST"
+        "--port=$DB_PORT"
+        "--user=$DB_USER"
+        "--single-transaction"
+        "--set-gtid-purged=OFF"
+        "--no-tablespaces"
+        "--skip-comments"
+        "--no-create-info"
+        "--skip-triggers"
+    )
+fi
 
 # ── Where clause for users (filter smoke-test accounts unless --include-smoke) ─
 if [ "$INCLUDE_SMOKE" = "true" ]; then
@@ -205,6 +229,17 @@ ls -lh "$OUTPUT_FILE"
 # Print row counts from the source DB for reference
 echo ""
 echo "Source row counts:"
+if [ "$USE_DOCKER_DUMP" = "true" ]; then
+    docker exec ebrcs-local-mysql mysql "-u$DB_USER" "-p$DB_PASSWORD" \
+    "$DB_NAME" -e \
+    "SELECT 'products' AS tbl, COUNT(*) AS cnt FROM products
+     UNION ALL SELECT 'product_prices', COUNT(*) FROM product_prices
+     UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
+     UNION ALL SELECT 'store_corners', COUNT(*) FROM store_corners
+     UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
+     UNION ALL SELECT 'users (exported)', COUNT(*) FROM users$([ -n "$USERS_WHERE" ] && echo " WHERE $USERS_WHERE")
+     UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history$([ -n "$USERS_WHERE" ] && echo " WHERE user_id IN (SELECT id FROM users WHERE $USERS_WHERE)");"
+else
 MYSQL_PWD="$DB_PASSWORD" mysql \
     "--host=$DB_HOST" "--port=$DB_PORT" "--user=$DB_USER" \
     "$DB_NAME" -e \
@@ -215,3 +250,4 @@ MYSQL_PWD="$DB_PASSWORD" mysql \
      UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
      UNION ALL SELECT 'users (exported)', COUNT(*) FROM users$([ -n "$USERS_WHERE" ] && echo " WHERE $USERS_WHERE")
      UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history$([ -n "$USERS_WHERE" ] && echo " WHERE user_id IN (SELECT id FROM users WHERE $USERS_WHERE)");"
+fi
