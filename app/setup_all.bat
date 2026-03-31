@@ -34,46 +34,44 @@ if errorlevel 1 (
 
 REM Docker 데몬 대기
 docker info >nul 2>&1
-if errorlevel 1 (
-    echo   Waiting for Docker daemon (up to 60s)...
-    set /a _dc=0
-    :wait_docker
-    docker info >nul 2>&1
-    if not errorlevel 1 goto docker_ready
-    set /a _dc+=1
-    if !_dc! geq 30 (
-        echo   Docker did not start in time. Please start Docker Desktop manually and re-run.
-        exit /b 1
-    )
-    timeout /t 2 /nobreak >nul
-    goto wait_docker
-    :docker_ready
-    echo   Docker daemon is ready.
-) else (
-    echo   Docker is running.
+if not errorlevel 1 goto docker_ready
+echo   Waiting for Docker daemon (up to 60s)...
+set /a _dc=0
+:wait_docker
+docker info >nul 2>&1
+if not errorlevel 1 goto docker_ready
+set /a _dc+=1
+if !_dc! geq 30 (
+    echo   Docker did not start in time. Please start Docker Desktop manually and re-run.
+    exit /b 1
 )
+timeout /t 2 /nobreak >nul
+goto wait_docker
+:docker_ready
+echo   Docker daemon is ready.
 echo.
 
-REM ── Step 1: 로컬 Docker MySQL 기동 + 스키마 + 시드 ───────────────────────────
-if "%SKIP_DB%"=="false" (
-    echo.
-    echo ^> Step 1/3: Setting up local Docker MySQL...
-    call "%PROJECT_ROOT%db\setup_local_db.bat" || exit /b 1
-    echo.
-) else (
-    echo.
-    echo ^> Step 1/3: Skipped --skip-db. Using DATABASE_URL from .env.
-    echo.
-)
-
-REM ── Step 2: Python venv + 의존성 설치 ────────────────────────────────────────
-echo ^> Step 2/3: Setting up Python venv and Node dependencies...
+REM ── Step 1: Python venv + 의존성 설치 ────────────────────────────────────────
+echo ^> Step 1/3: Setting up Python venv and Node dependencies...
 cd /d "%APP_DIR%"
 call setup_venv.bat || exit /b 1
 echo.
 
+REM ── Step 2: 로컬 Docker MySQL 기동 + 스키마 + 시드 ───────────────────────────
+if "%SKIP_DB%"=="false" (
+    echo.
+    echo ^> Step 2/3: Setting up local Docker MySQL...
+    call "%PROJECT_ROOT%db\setup_local_db.bat" || exit /b 1
+    echo.
+) else (
+    echo.
+    echo ^> Step 2/3: Skipped --skip-db. Using DATABASE_URL from .env.
+    echo.
+)
+
 REM ── Step 3: DB 스키마 최종 확인 ──────────────────────────────────────────────
 echo ^> Step 3/3: Verifying DB schema...
+cd /d "%APP_DIR%"
 call setup_db.bat || exit /b 1
 echo.
 
