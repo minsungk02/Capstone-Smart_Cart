@@ -413,6 +413,63 @@ run_web.bat
 
 ---
 
+### 📱 모바일 카메라 테스트 (mkcert HTTPS)
+
+브라우저 보안 정책상 카메라(`getUserMedia`)는 **HTTPS 또는 localhost에서만** 작동합니다.
+같은 WiFi의 모바일에서 카메라를 테스트하려면 아래 설정이 필요합니다. **(최초 1회)**
+
+#### 🍎 macOS
+
+```bash
+# 1. mkcert 설치 및 로컬 CA 등록
+brew install mkcert
+mkcert -install
+
+# 2. 인증서 생성 (프로젝트 루트에서)
+LOCAL_IP=$(ipconfig getifaddr en0)
+mkcert -cert-file app/certs/cert.pem \
+       -key-file  app/certs/key.pem \
+       localhost 127.0.0.1 "$LOCAL_IP"
+```
+
+#### 🪟 Windows (관리자 권한 CMD)
+
+```cmd
+winget install FiloSottile.mkcert
+mkcert -install
+
+for /f "tokens=*" %i in ('powershell -command "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notmatch 'Loopback'} | Select-Object -First 1).IPAddress"') do set LOCAL_IP=%i
+mkcert -cert-file app/certs/cert.pem -key-file app/certs/key.pem localhost 127.0.0.1 %LOCAL_IP%
+```
+
+인증서 생성 후 `./run_web.sh` 실행 시 터미널에 아래처럼 HTTPS Network 주소가 표시됩니다:
+
+```
+➜  Local:   https://localhost:5173/
+➜  Network: https://192.168.x.x:5173/   ← 폰에서 이 주소로 접속
+```
+
+#### 폰에 CA 신뢰 등록 (폰마다 1회)
+
+**iOS:**
+```bash
+open "$(mkcert -CAROOT)"
+# → Finder에서 rootCA.pem 을 AirDrop으로 iPhone 전송
+```
+아이폰: `설정 > 일반 > VPN 및 기기 관리 > 프로파일 설치`
+→ `설정 > 일반 > 정보 > 인증서 신뢰 설정 > mkcert 토글 ON` ← **이 단계 필수**
+
+**Android:**
+```bash
+cp "$(mkcert -CAROOT)/rootCA.pem" ~/Desktop/mkcert-ca.crt
+# → 파일을 폰으로 전송 (카카오톡/드라이브 등)
+```
+파일 앱에서 `.crt` 열기 → **VPN 및 앱 인증서** 선택 → 이름 입력 후 확인
+
+> `app/certs/`는 gitignore 처리되어 있습니다. 팀원 각자 본인 환경에서 발급해야 합니다.
+
+---
+
 ### DB 뷰어 (Adminer)
 
 Docker MySQL과 함께 Adminer가 자동으로 같이 실행됩니다.

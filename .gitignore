@@ -54,3 +54,6 @@ data/ebrcs.db-journal
 # Generated DB seeds/dumps
 db/seeds/*
 !db/seeds/.gitkeep
+
+# mkcert 로컬 HTTPS 인증서 (개인 키 포함 — 절대 커밋 금지)
+app/certs/
