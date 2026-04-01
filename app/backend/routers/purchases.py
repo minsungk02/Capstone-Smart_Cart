@@ -196,19 +196,15 @@ def _top_discount_products_by_category(
                     p.item_no,
                     p.product_name,
                     p.picture,
-                    pd.is_discounted,
-                    pd.discount_rate,
-                    pd.discount_amount,
+                    pp.is_discounted,
+                    pp.discount_rate,
+                    pp.discount_amount,
                     ROW_NUMBER() OVER (
                         PARTITION BY p.item_no
-                        ORDER BY
-                            pp.checked_at DESC,
-                            pd.updated_at DESC,
-                            pd.id DESC
+                        ORDER BY pp.checked_at DESC, pp.id DESC
                     ) AS rn_latest
                 FROM products p
                 JOIN product_prices pp ON pp.product_id = p.id
-                JOIN product_discounts pd ON pd.product_price_id = pp.id
                 WHERE p.category_l = :category_l
             )
             SELECT item_no, product_name, picture, discount_rate, discount_amount
