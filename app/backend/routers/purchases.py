@@ -234,6 +234,11 @@ def _top_discount_products_by_category(
     return result
 
 
+def _extract_item_no(name: str) -> str | None:
+    parts = name.split("_", 1)
+    return parts[0] if len(parts) == 2 and parts[0].isdigit() else None
+
+
 @router.get("/my", response_model=List[PurchaseResponse])
 def get_my_purchases(
     current_user: Annotated[models.User, Depends(get_current_user)],
@@ -247,12 +252,23 @@ def get_my_purchases(
         .all()
     )
 
+    all_item_nos = list({
+        _extract_item_no(item.get("name", ""))
+        for p in purchases
+        for item in (p.items or [])
+        if _extract_item_no(item.get("name", ""))
+    })
+    picture_map = _latest_picture_by_item_no(db, all_item_nos)
+
     return [
         {
             "id": p.id,
             "user_id": p.user_id,
             "username": current_user.username,
-            "items": p.items,
+            "items": [
+                {**item, "picture": picture_map.get(_extract_item_no(item.get("name", "")) or "")}
+                for item in (p.items or [])
+            ],
             "total_amount": p.total_amount,
             "timestamp": p.timestamp.isoformat(),
             "notes": p.notes,

@@ -62,7 +62,7 @@ export default function MyPage() {
           </h2>
         </div>
 
-        <div className="p-6">
+        <div className="p-6 max-h-[560px] overflow-y-auto">
           {isLoading ? (
             <div className="text-center py-12">
               <p className="text-[var(--color-text-secondary)]">로딩 중...</p>
@@ -100,9 +100,19 @@ export default function MyPage() {
                     {purchase.items.map((item, itemIdx) => (
                       <div
                         key={itemIdx}
-                        className="flex justify-between text-sm"
+                        className="flex items-center gap-3 text-sm"
                       >
-                        <span className="text-[var(--color-text)]">
+                        {item.picture ? (
+                          <img
+                            src={item.picture}
+                            alt={item.name}
+                            className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-100"
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg bg-gray-100 flex-shrink-0" />
+                        )}
+                        <span className="flex-1 text-[var(--color-text)]">
                           {item.name}
                         </span>
                         <div className="text-right">

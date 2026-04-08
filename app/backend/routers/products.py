@@ -401,7 +401,7 @@ async def list_products(db: Session = Depends(get_db)):
         rows = db.execute(
             text(
                 """
-                SELECT id, item_no, barcd, product_name
+                SELECT id, item_no, barcd, product_name, picture
                 FROM products
                 ORDER BY id DESC
                 """
@@ -451,6 +451,7 @@ async def list_products(db: Session = Depends(get_db)):
                 "name": name,
                 "price": price,
                 "barcd": row.get("barcd"),
+                "picture": str(row.get("picture") or "").strip() or None,
                 "label": f"{item_no}_{name}",
                 "embedding_count": int(embedding_count),
             }
