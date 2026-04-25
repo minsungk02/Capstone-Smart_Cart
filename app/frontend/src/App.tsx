@@ -11,6 +11,7 @@ import AdminPurchasesPage from "./pages/AdminPurchasesPage";
 import ChatbotWidget from "./components/ChatbotWidget";
 import { useAuthStore } from "./stores/authStore";
 import { shouldRedirectForAdminRoute } from "./routing/guards";
+import AdminReorderPage from "./pages/AdminReorderPage";
 
 // User menu items
 const USER_NAV_ITEMS = [
@@ -25,6 +26,7 @@ const ADMIN_NAV_ITEMS = [
   { path: "/", label: "홈", icon: "🏠" },
   { path: "/products", label: "상품 관리", icon: "📦" },
   { path: "/admin/purchases", label: "구매 내역", icon: "📊" },
+  { path: "/admin/reorder", label: "자동 발주", icon: "🔄" },  // 이 줄 추가
 ];
 
 export default function App() {
@@ -277,6 +279,7 @@ export default function App() {
           <Route path="/mypage" element={<MyPage />} />
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/admin/purchases" element={<AdminPurchasesPage />} />
+          <Route path="/admin/reorder" element={<AdminReorderPage />} />  {/* 이 줄 추가 */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

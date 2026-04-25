@@ -14,7 +14,7 @@ if [ ! -d "$APP_DIR/backend/.venv" ]; then
     exit 1
 fi
 
-source "$APP_DIR/backend/.venv/bin/activate"
+source "$APP_DIR/backend/.venv/Scripts/activate"
 export PYTHONPATH="$APP_DIR:$PROJECT_ROOT"
 
 python -m backend.db_bootstrap "$@"

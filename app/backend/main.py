@@ -30,6 +30,7 @@ from backend.routers import (
     db_viewer,
     products,
     purchases,
+    reorder,
     sessions,
 )
 
@@ -108,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(products.router, prefix="/api")
     app.include_router(purchases.router, prefix="/api")
     app.include_router(chatbot.router, prefix="/api")
+    app.include_router(reorder.router, prefix="/api")
     app.include_router(checkout.router, prefix="/api")
     app.include_router(db_viewer.router)
 
