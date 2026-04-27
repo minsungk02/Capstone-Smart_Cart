@@ -36,7 +36,7 @@ echo.
 
 REM ── Step 2: 스키마 bootstrap ─────────────────────────────────────────────────
 echo ^> Step 2/3: Bootstrapping DB schema...
-cd /d "%PROJECT_ROOT%app"
+cd /d "%PROJECT_ROOT%\app"
 call setup_db.bat || exit /b 1
 cd /d "%PROJECT_ROOT%"
 echo.
