@@ -6,6 +6,7 @@ export interface Product {
   name: string;
   price?: number;
   barcd?: string;
+  picture?: string | null;
   embedding_count: number;
   label?: string;
 }

@@ -37,4 +37,3 @@ echo.
 echo 사용법:
 echo   setup_db.bat  ^(DB 스키마 초기화/검증^)
 echo   run_web.bat
-pause

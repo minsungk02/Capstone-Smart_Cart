@@ -196,19 +196,15 @@ def _top_discount_products_by_category(
                     p.item_no,
                     p.product_name,
                     p.picture,
-                    pd.is_discounted,
-                    pd.discount_rate,
-                    pd.discount_amount,
+                    pp.is_discounted,
+                    pp.discount_rate,
+                    pp.discount_amount,
                     ROW_NUMBER() OVER (
                         PARTITION BY p.item_no
-                        ORDER BY
-                            pp.checked_at DESC,
-                            pd.updated_at DESC,
-                            pd.id DESC
+                        ORDER BY pp.checked_at DESC, pp.id DESC
                     ) AS rn_latest
                 FROM products p
                 JOIN product_prices pp ON pp.product_id = p.id
-                JOIN product_discounts pd ON pd.product_price_id = pp.id
                 WHERE p.category_l = :category_l
             )
             SELECT item_no, product_name, picture, discount_rate, discount_amount
@@ -238,6 +234,11 @@ def _top_discount_products_by_category(
     return result
 
 
+def _extract_item_no(name: str) -> str | None:
+    parts = name.split("_", 1)
+    return parts[0] if len(parts) == 2 and parts[0].isdigit() else None
+
+
 @router.get("/my", response_model=List[PurchaseResponse])
 def get_my_purchases(
     current_user: Annotated[models.User, Depends(get_current_user)],
@@ -251,12 +252,23 @@ def get_my_purchases(
         .all()
     )
 
+    all_item_nos = list({
+        _extract_item_no(item.get("name", ""))
+        for p in purchases
+        for item in (p.items or [])
+        if _extract_item_no(item.get("name", ""))
+    })
+    picture_map = _latest_picture_by_item_no(db, all_item_nos)
+
     return [
         {
             "id": p.id,
             "user_id": p.user_id,
             "username": current_user.username,
-            "items": p.items,
+            "items": [
+                {**item, "picture": picture_map.get(_extract_item_no(item.get("name", "")) or "")}
+                for item in (p.items or [])
+            ],
             "total_amount": p.total_amount,
             "timestamp": p.timestamp.isoformat(),
             "notes": p.notes,
