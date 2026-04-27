@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../api/base";
 import { useAuthStore } from "../stores/authStore";
 import { deletePurchase, getMyPurchases } from "../api/purchases";
+import PurchaseCharts from "../components/PurchaseCharts";
 
 export default function MyPage() {
   const { user, token } = useAuthStore();
@@ -53,6 +54,10 @@ export default function MyPage() {
           {user?.name}님의 구매 내역을 확인하세요
         </p>
       </div>
+
+      {purchases && purchases.length > 0 && (
+        <PurchaseCharts purchases={purchases} />
+      )}
 
       {/* Purchase History */}
       <div className="bg-white rounded-2xl shadow-sm border border-[var(--color-border)] overflow-hidden">
