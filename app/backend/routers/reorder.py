@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -77,7 +78,17 @@ def _ensure_reorder_table(db: Session) -> None:
 
 
 def _row_to_response(row: dict, admin_name: str) -> ReorderResponse:
-    items = row["items"] if isinstance(row["items"], list) else []
+    raw = row.get("items", [])
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+
     total_quantity = sum(int(i.get("quantity", 0)) for i in items)
     total_amount = sum(
         int(i.get("quantity", 0)) * int(i.get("unit_price") or 0)
@@ -110,6 +121,7 @@ def _get_admin_name(db: Session, admin_id: int) -> str:
 @router.get("/suggestions")
 async def get_reorder_suggestions(
     limit: int = 10,
+    sort: str = "best_seller",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -133,35 +145,58 @@ async def get_reorder_suggestions(
             if count > 0:
                 product_counts[name] = product_counts.get(name, 0) + count
 
-    sorted_products = sorted(product_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+    rows = db.execute(
+        text("""
+            SELECT p.item_no, p.product_name, p.stock, pp.price
+            FROM products p
+            LEFT JOIN product_prices pp ON pp.product_id = p.id
+            ORDER BY pp.checked_at DESC, pp.id DESC
+        """)
+    ).mappings().all()
 
-    suggestions = []
-    for product_name, total_sold in sorted_products:
-        db_row = db.execute(
-            text("""
-                SELECT p.item_no, p.product_name, pp.price
-                FROM products p
-                LEFT JOIN product_prices pp ON pp.product_id = p.id
-                WHERE p.product_name = :name
-                ORDER BY pp.checked_at DESC, pp.id DESC
-                LIMIT 1
-            """),
-            {"name": product_name},
-        ).mappings().first()
+    seen = set()
+    product_db_map: dict[str, dict] = {}
+    for row in rows:
+        name = str(row["product_name"])
+        if name not in seen:
+            seen.add(name)
+            product_db_map[name] = dict(row)
 
-        item_no = str(db_row["item_no"]) if db_row else None
-        price = int(db_row["price"]) if db_row and db_row.get("price") else None
-        suggested_qty = max(1, round(total_sold * 0.5))
+    if sort == "low_stock":
+        candidates = []
+        for name, db_row in product_db_map.items():
+            stock = int(db_row.get("stock") or 0)
+            total_sold = product_counts.get(name, 0)
+            suggested_qty = max(1, round(total_sold * 0.5)) if total_sold > 0 else 10
+            candidates.append({
+                "product_name": name,
+                "item_no": str(db_row["item_no"]) if db_row.get("item_no") else None,
+                "total_sold": total_sold,
+                "current_stock": stock,
+                "suggested_quantity": suggested_qty,
+                "unit_price": int(db_row["price"]) if db_row.get("price") else None,
+            })
+        candidates.sort(key=lambda x: (x["current_stock"], -x["total_sold"]))
+        return candidates[:limit]
 
-        suggestions.append({
-            "product_name": product_name,
-            "item_no": item_no,
-            "total_sold": total_sold,
-            "suggested_quantity": suggested_qty,
-            "unit_price": price,
-        })
-
-    return suggestions
+    else:
+        sorted_products = sorted(product_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+        suggestions = []
+        for product_name, total_sold in sorted_products:
+            db_row = product_db_map.get(product_name)
+            item_no = str(db_row["item_no"]) if db_row and db_row.get("item_no") else None
+            price = int(db_row["price"]) if db_row and db_row.get("price") else None
+            stock = int(db_row.get("stock") or 0) if db_row else 0
+            suggested_qty = max(1, round(total_sold * 0.5))
+            suggestions.append({
+                "product_name": product_name,
+                "item_no": item_no,
+                "total_sold": total_sold,
+                "current_stock": stock,
+                "suggested_quantity": suggested_qty,
+                "unit_price": price,
+            })
+        return suggestions
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=ReorderResponse)
@@ -177,7 +212,6 @@ async def create_reorder(
 
     _ensure_reorder_table(db)
 
-    import json
     items_json = json.dumps(
         [item.model_dump() for item in payload.items],
         ensure_ascii=False,
@@ -236,7 +270,7 @@ async def update_reorder_status(
 
     new_status = payload.status.strip().lower()
     if new_status not in STATUS_TRANSITIONS:
-        raise HTTPException(status_code=422, detail=f"유효하지 않은 상태입니다.")
+        raise HTTPException(status_code=422, detail="유효하지 않은 상태입니다.")
 
     row = db.execute(
         text("SELECT * FROM reorder_history WHERE id = :id"),
@@ -257,6 +291,28 @@ async def update_reorder_status(
             text("UPDATE reorder_history SET status = :status, updated_at = NOW() WHERE id = :id"),
             {"status": new_status, "id": reorder_id},
         )
+
+        # 입고 확인 시 재고 자동 증가 (product_name 앞 숫자로 item_no 매칭)
+        if new_status == "received":
+            items = dict(row).get("items") or []
+            if isinstance(items, str):
+                items = json.loads(items)
+            for item in items:
+                product_name = item.get("product_name", "")
+                quantity = int(item.get("quantity", 0))
+                if product_name and quantity > 0:
+                    # "10093_농심매운새우깡90G" → "10093"
+                    extracted_item_no = product_name.split("_")[0].strip()
+                    db.execute(
+                        text("""
+                            UPDATE products
+                            SET stock = COALESCE(stock, 0) + :qty,
+                                updated_at = NOW()
+                            WHERE item_no = :item_no
+                        """),
+                        {"qty": quantity, "item_no": extracted_item_no},
+                    )
+
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -289,7 +345,10 @@ async def delete_reorder(
         raise HTTPException(status_code=422, detail="대기 중이거나 취소된 발주만 삭제할 수 있습니다.")
 
     try:
-        db.execute(text("DELETE FROM reorder_history WHERE id = :id"), {"id": reorder_id})
+        db.execute(
+            text("DELETE FROM reorder_history WHERE id = :id"),
+            {"id": reorder_id},
+        )
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
