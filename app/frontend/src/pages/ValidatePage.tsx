@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useSessionStore } from "../stores/sessionStore";
 import { useAuthStore } from "../stores/authStore";
 import { confirmBilling, getBilling, updateBilling } from "../api/checkout";
 import { createPurchase } from "../api/purchases";
+import { getWishlist } from "../api/wishlist";
+import type { WishlistItem } from "../api/wishlist";
 
 type PaymentMethod = "card" | "easy" | "account";
 
@@ -23,6 +26,8 @@ export default function ValidatePage() {
   const [payerName, setPayerName] = useState("");
   const [payerPhone, setPayerPhone] = useState("");
   const [isPaymentAgreed, setIsPaymentAgreed] = useState(false);
+  const [showWishlistWarning, setShowWishlistWarning] = useState(true);
+
   const { token } = useAuthStore();
   const {
     sessionId,
@@ -43,6 +48,18 @@ export default function ValidatePage() {
   );
   const itemCount = entries.length;
   const formatAmount = (value: number) => `₩${value.toLocaleString("ko-KR")}`;
+
+  const { data: wishlist = [] } = useQuery<WishlistItem[]>({
+    queryKey: ["wishlist", token],
+    queryFn: () => getWishlist(token!),
+    enabled: !!token,
+  });
+
+  const missingItems = useMemo(() => {
+    return wishlist.filter((wishItem) => {
+      return !Object.keys(billingItems).includes(wishItem.product_name);
+    });
+  }, [wishlist, billingItems]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -96,7 +113,6 @@ export default function ValidatePage() {
     try {
       setIsConfirming(true);
 
-      // Create purchase record
       const items = Object.entries(billingItems).map(([name, count]) => ({
         name,
         count,
@@ -111,7 +127,6 @@ export default function ValidatePage() {
       });
       purchaseSaved = true;
 
-      // Confirm billing
       const confirmed = await confirmBilling(sessionId);
       const finalAmount =
         confirmed.confirmed_total_amount ?? created.total_amount;
@@ -120,7 +135,6 @@ export default function ValidatePage() {
           ? `\n(가격 미확인 품목 ${confirmed.unpriced_items.length}개 포함)`
           : "";
 
-      // Reset and navigate
       resetSession();
       alert(`구매가 완료되었습니다! 결제 금액: ${formatAmount(finalAmount)}${warning}`);
       navigate("/mypage");
@@ -139,8 +153,15 @@ export default function ValidatePage() {
 
   const openPaymentModal = useCallback(() => {
     if (entries.length === 0 || isConfirming) return;
+
+    if (missingItems.length > 0) {
+      const itemNames = missingItems.map(i => i.product_name).join(", ");
+      const confirmMsg = `찜목록의 [${itemNames}] 상품이 아직 장바구니에 없어요.\n그대로 결제를 진행하시겠습니까?`;
+      if (!window.confirm(confirmMsg)) return;
+    }
+
     setIsPaymentModalOpen(true);
-  }, [entries.length, isConfirming]);
+  }, [entries.length, isConfirming, missingItems]);
 
   const closePaymentModal = useCallback(() => {
     if (isConfirming || isPreparingPayment) return;
@@ -205,10 +226,35 @@ export default function ValidatePage() {
 
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)]">
-      {/* Main Content */}
       <div className="flex-1 overflow-auto">
         <div className="max-w-4xl mx-auto p-4 md:p-6 lg:p-8 space-y-4 md:space-y-6">
-          {/* Header */}
+          
+          {missingItems.length > 0 && showWishlistWarning && (
+            <div className="bg-orange-50 border border-orange-200 rounded-2xl p-5 flex items-start gap-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center text-xl flex-shrink-0">
+                💡
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-orange-900">혹시 잊으신 물건은 없나요?</h4>
+                  <button onClick={() => setShowWishlistWarning(false)} className="text-orange-400 hover:text-orange-600 transition-colors">
+                    <span className="text-lg">✕</span>
+                  </button>
+                </div>
+                <p className="text-sm text-orange-800 mt-1">
+                  찜목록에 담으신 <span className="font-extrabold text-[var(--color-primary)]">[{missingItems[0].product_name}]</span>
+                  {missingItems.length > 1 && ` 외 ${missingItems.length - 1}건`}이 아직 장바구니에 없습니다.
+                </p>
+                <button 
+                  onClick={() => navigate("/checkout")}
+                  className="mt-3 text-xs font-bold bg-orange-600 text-white px-3 py-1.5 rounded-lg hover:bg-orange-700 transition-colors shadow-sm"
+                >
+                  상품 더 담으러 가기
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-xl md:rounded-2xl p-4 md:p-6 border border-[var(--color-border)] shadow-sm">
             <div className="flex items-start gap-3 md:gap-4">
               <div className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-[var(--color-secondary-light)] flex items-center justify-center flex-shrink-0">
@@ -237,9 +283,7 @@ export default function ValidatePage() {
             </div>
           </div>
 
-          {/* Summary Cards */}
           <div className="grid grid-cols-2 gap-3 md:gap-4">
-            {/* Total Items */}
             <div className="bg-white rounded-xl md:rounded-2xl p-4 md:p-6 border border-[var(--color-border)] shadow-sm">
               <div className="flex items-center gap-2 md:gap-3 mb-2 md:mb-3">
                 <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg md:rounded-xl bg-[var(--color-primary-light)] flex items-center justify-center">
@@ -254,7 +298,6 @@ export default function ValidatePage() {
               </div>
             </div>
 
-            {/* Product Types */}
             <div className="bg-white rounded-xl md:rounded-2xl p-4 md:p-6 border border-[var(--color-border)] shadow-sm">
               <div className="flex items-center justify-between mb-2 md:mb-3">
                 <div className="flex items-center gap-2 md:gap-3">
@@ -274,11 +317,6 @@ export default function ValidatePage() {
               <div className="text-2xl md:text-3xl font-bold text-[var(--color-text)]">
                 {formatAmount(totalAmount)}
               </div>
-              {currency !== "KRW" && (
-                <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-                  통화: {currency}
-                </div>
-              )}
             </div>
           </div>
 
@@ -288,9 +326,7 @@ export default function ValidatePage() {
             </div>
           )}
 
-          {/* Product List */}
           <div className="bg-white rounded-2xl border border-[var(--color-border)] shadow-sm overflow-hidden">
-            {/* Header */}
             <div className="flex items-center justify-between p-6 border-b border-[var(--color-border)]">
               <div className="flex items-center gap-2">
                 <span className="text-xl">📋</span>
@@ -303,7 +339,6 @@ export default function ValidatePage() {
               </span>
             </div>
 
-            {/* Empty State or Product List */}
             {entries.length === 0 ? (
               <div className="p-12 text-center space-y-4">
                 <div className="w-24 h-24 mx-auto bg-gray-100 rounded-2xl flex items-center justify-center">
@@ -358,7 +393,7 @@ export default function ValidatePage() {
                           <button
                             onClick={() => handleQtyChange(name, -1)}
                             disabled={isConfirming || updatingItem === name}
-                            className="w-8 h-8 rounded-lg hover:bg-white text-lg font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="w-8 h-8 rounded-lg hover:bg-white text-lg font-bold transition-colors disabled:opacity-40"
                           >
                             -
                           </button>
@@ -368,7 +403,7 @@ export default function ValidatePage() {
                           <button
                             onClick={() => handleQtyChange(name, 1)}
                             disabled={isConfirming || updatingItem === name}
-                            className="w-8 h-8 rounded-lg hover:bg-white text-lg font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="w-8 h-8 rounded-lg hover:bg-white text-lg font-bold transition-colors disabled:opacity-40"
                           >
                             +
                           </button>
@@ -376,7 +411,7 @@ export default function ValidatePage() {
                         <button
                           onClick={() => handleQtyChange(name, -qty)}
                           disabled={isConfirming || updatingItem === name}
-                          className="px-4 py-2 text-sm text-[var(--color-danger)] hover:bg-red-50 rounded-lg font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          className="px-4 py-2 text-sm text-[var(--color-danger)] hover:bg-red-50 rounded-lg font-medium transition-colors disabled:opacity-40"
                         >
                           삭제
                         </button>
@@ -390,7 +425,6 @@ export default function ValidatePage() {
         </div>
       </div>
 
-      {/* Footer */}
       <div className="border-t border-[var(--color-border)] bg-white">
         <div className="max-w-4xl mx-auto p-4 md:p-6">
           <div className="flex items-center justify-between mb-3 md:mb-4">
@@ -412,7 +446,7 @@ export default function ValidatePage() {
             <button
               onClick={openPaymentModal}
               disabled={entries.length === 0 || isConfirming}
-              className="flex-1 px-4 py-3 md:px-6 md:py-4 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white rounded-lg md:rounded-xl text-sm md:text-base font-semibold transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 px-4 py-3 md:px-6 md:py-4 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white rounded-lg md:rounded-xl text-sm md:text-base font-semibold transition-colors shadow-sm disabled:opacity-50"
             >
               {isConfirming ? "처리 중..." : "결제하기"}
             </button>
@@ -429,7 +463,7 @@ export default function ValidatePage() {
             }
           }}
         >
-          <div className="w-full max-w-xl bg-white rounded-2xl border border-[var(--color-border)] shadow-2xl overflow-hidden">
+          <div className="w-full max-w-xl bg-white rounded-2xl border border-[var(--color-border)] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="px-5 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-bold text-[var(--color-text)]">결제하기</h3>
@@ -440,8 +474,7 @@ export default function ValidatePage() {
               <button
                 onClick={closePaymentModal}
                 disabled={isConfirming || isPreparingPayment}
-                className="w-8 h-8 rounded-lg hover:bg-gray-100 text-[var(--color-text-secondary)] disabled:opacity-40"
-                aria-label="결제창 닫기"
+                className="w-8 h-8 rounded-lg hover:bg-gray-100 text-[var(--color-text-secondary)]"
               >
                 ✕
               </button>
@@ -457,11 +490,6 @@ export default function ValidatePage() {
                   <span className="text-sm font-semibold text-[var(--color-text)]">최종 결제금액</span>
                   <span className="text-2xl font-bold text-[var(--color-primary)]">{formatAmount(totalAmount)}</span>
                 </div>
-                {unpricedItems.length > 0 && (
-                  <p className="mt-2 text-xs text-red-600">
-                    가격 미확인 품목 {unpricedItems.length}개는 0원 처리됩니다.
-                  </p>
-                )}
               </div>
 
               <div>
@@ -522,7 +550,7 @@ export default function ValidatePage() {
                 type="button"
                 onClick={closePaymentModal}
                 disabled={isConfirming || isPreparingPayment}
-                className="flex-1 px-4 py-3 border border-[var(--color-border)] rounded-xl font-semibold text-[var(--color-text)] hover:bg-gray-50 disabled:opacity-50"
+                className="flex-1 px-4 py-3 border border-[var(--color-border)] rounded-xl font-semibold text-[var(--color-text)] hover:bg-gray-50"
               >
                 취소
               </button>
@@ -530,7 +558,7 @@ export default function ValidatePage() {
                 type="button"
                 onClick={handlePaymentSubmit}
                 disabled={isConfirming || isPreparingPayment || entries.length === 0}
-                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50"
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)]"
               >
                 {isPreparingPayment || isConfirming
                   ? "결제 처리 중..."

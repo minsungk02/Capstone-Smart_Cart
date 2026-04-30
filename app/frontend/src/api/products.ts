@@ -1,13 +1,21 @@
 ﻿import { request } from "./base";
 
 export interface Product {
-  id?: number;
+  id?: number | null;
   item_no: string;
   name: string;
-  price?: number;
-  barcd?: string;
+  price?: number | null;
+  barcd?: string | null;
   embedding_count: number;
   label?: string;
+  picture?: string | null;
+}
+
+export interface ListProductsResponse {
+  products: Product[];
+  total_embeddings: number;
+  total_count: number;
+  has_more: boolean;
 }
 
 export interface AddProductPayload {
@@ -24,15 +32,7 @@ export interface ProductDetail {
   product_name: string;
   barcd: string | null;
   stock: number | null;
-  stock_column: string | null;
   price: number | null;
-  currency: string | null;
-  price_source: string | null;
-  price_checked_at: string | null;
-  is_discounted: boolean | null;
-  discount_rate: number | null;
-  discount_amount: number | null;
-  discount_updated_at: string | null;
   available_fields: {
     stock: boolean;
     discount: boolean;
@@ -49,11 +49,15 @@ export interface UpdateProductDetailPayload {
   discount_amount?: number;
 }
 
-export function listProducts(): Promise<{
-  products: Product[];
-  total_embeddings: number;
-}> {
-  return request("/products");
+/**
+ * 페이지네이션을 지원하는 상품 목록 조회
+ */
+export function listProducts(
+  token?: string,
+  params?: { skip: number; limit: number }
+): Promise<ListProductsResponse> {
+  const query = params ? `?skip=${params.skip}&limit=${params.limit}` : "";
+  return request(`/products${query}`, { token });
 }
 
 export function addProduct(payload: AddProductPayload) {

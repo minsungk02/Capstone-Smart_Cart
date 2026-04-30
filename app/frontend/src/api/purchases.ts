@@ -18,6 +18,7 @@ export interface PurchaseResponse {
 }
 
 export interface PopularProduct {
+  item_no: string; // 상품 번호를 명시적으로 저장[cite: 8]
   name: string;
   total_count: number;
   picture?: string | null;
@@ -42,6 +43,23 @@ export interface DashboardStats {
   total_revenue: number;
   average_order_value: number;
   today_revenue: number;
+}
+
+/**
+ * 레이블(예: 10091_꼬깔콘)에서 번호와 이름을 분리하는 헬퍼 함수
+ */
+function splitLabel(combinedName: string): { item_no: string; name: string } {
+  if (combinedName.includes("_")) {
+    const parts = combinedName.split("_");
+    const potentialId = parts[0];
+    if (/^\d+$/.test(potentialId)) { // 앞부분이 숫자인 경우에만 ID로 간주
+      return {
+        item_no: potentialId,
+        name: parts.slice(1).join("_")
+      };
+    }
+  }
+  return { item_no: combinedName, name: combinedName };
 }
 
 export function getMyPurchases(token: string): Promise<PurchaseResponse[]> {
@@ -82,12 +100,20 @@ export async function getDashboardStats(token: string, periodDays?: number): Pro
   };
 }
 
+/**
+ * 실시간 베스트 상품을 가져오면서 번호/이름 분리 로직 적용
+ */
 export async function getPopularProducts(token: string, limit = 5): Promise<PopularProduct[]> {
   const rows = await request<PopularProduct[]>(`/purchases/popular?limit=${limit}`, { token });
-  return (rows ?? []).map((row) => ({
-    ...row,
-    picture: row.picture ?? null,
-  }));
+  return (rows ?? []).map((row) => {
+    const { item_no, name } = splitLabel(row.name);
+    return {
+      ...row,
+      item_no: row.item_no || item_no, // 원래 번호가 있으면 쓰고, 없으면 이름에서 추출[cite: 8]
+      name: name,
+      picture: row.picture ?? null,
+    };
+  });
 }
 
 export async function getDiscountCategories(token: string): Promise<string[]> {

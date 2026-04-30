@@ -31,6 +31,7 @@ from backend.routers import (
     products,
     purchases,
     sessions,
+    wishlist,
 )
 
 logger = logging.getLogger("backend")
@@ -110,6 +111,7 @@ def create_app() -> FastAPI:
     app.include_router(chatbot.router, prefix="/api")
     app.include_router(checkout.router, prefix="/api")
     app.include_router(db_viewer.router)
+    app.include_router(wishlist.router, prefix="/api")
 
     @app.get("/api/health")
     async def health():

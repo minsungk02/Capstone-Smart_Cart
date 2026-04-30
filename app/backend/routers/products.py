@@ -32,7 +32,6 @@ router = APIRouter(tags=["products"])
 DINO_WEIGHT = 0.7
 CLIP_WEIGHT = 0.3
 MIN_IMAGES = 3
-# Allow extra samples for better robustness while keeping an upper bound.
 MAX_IMAGES = 10
 STOCK_COLUMN_CANDIDATES = ("stock", "stock_qty", "inventory", "quantity", "qty")
 
@@ -233,10 +232,7 @@ async def add_product(
     images: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
-    """Register a new product with 3-10 images.
-
-    Generates embeddings, appends to DB files, and updates the FAISS index.
-    """
+    """Register a new product with 3-10 images."""
     if not item_no.strip():
         raise HTTPException(status_code=422, detail="Item number is required")
     if not name.strip():
@@ -253,7 +249,6 @@ async def add_product(
     dino_dim = bundle["dino_dim"]
     clip_dim = bundle["clip_dim"]
 
-    # Generate raw embeddings for each image
     new_raw_list: list[np.ndarray] = []
     for upload in images:
         data = await upload.read()
@@ -272,7 +267,6 @@ async def add_product(
     label = f"{clean_item_no}_{clean_name}"
     new_labels = np.array([label] * len(new_raw_list), dtype=object)
 
-    # Build weighted embeddings for new images BEFORE acquiring lock
     weighted_new = np.stack(
         [_build_weighted(r, dino_dim, clip_dim) for r in new_raw_list],
         axis=0,
@@ -322,9 +316,7 @@ async def add_product(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to create product record")
 
-    # Acquire writer lock: blocks all inference requests until update completes
     async with app_state.index_rwlock.writer_lock:
-        # Load existing DB
         if os.path.exists(config.EMBEDDINGS_PATH) and os.path.exists(config.LABELS_PATH):
             old_emb = np.load(config.EMBEDDINGS_PATH, allow_pickle=False)
             old_lbl = np.load(config.LABELS_PATH, allow_pickle=True)
@@ -334,31 +326,21 @@ async def add_product(
             updated_emb = new_raw
             updated_lbl = new_labels
 
-        # Save updated DB files
         np.save(config.EMBEDDINGS_PATH, updated_emb)
         np.save(config.LABELS_PATH, updated_lbl)
 
-        # --- INCREMENTAL UPDATE (핵심 개선!) ---
-        # Before: Rebuilt entire index O(n) - slow for large databases
-        # After: Add only new vectors O(k) where k = number of new products
         if app_state.faiss_index is None or app_state.faiss_index.ntotal == 0:
-            # First product registration: create new index
             dim = weighted_new.shape[1]
             app_state.faiss_index = faiss.IndexFlatIP(dim)
 
-        # Incremental add: only adds new weighted vectors (fast!)
         app_state.faiss_index.add(weighted_new)
-
-        # Persist updated index to disk
         faiss.write_index(app_state.faiss_index, config.FAISS_INDEX_PATH)
 
-        # Update in-memory weighted_db by appending new vectors
         if app_state.weighted_db is None or len(app_state.weighted_db) == 0:
             app_state.weighted_db = weighted_new
         else:
             app_state.weighted_db = np.vstack([app_state.weighted_db, weighted_new])
 
-        # Swap labels atomically
         app_state.labels = updated_lbl
 
     try:
@@ -376,33 +358,27 @@ async def add_product(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
 
-    logger.info(
-        "Product '%s' (%s) added (%d images, total DB: %d)",
-        clean_name,
-        clean_item_no,
-        len(images),
-        len(updated_lbl),
-    )
-
     return {
         "status": "added",
         "item_no": clean_item_no,
         "product_name": clean_name,
-        "label": label,
-        "price": int(price),
-        "images_count": len(images),
         "total_products": len(set(updated_lbl)),
         "total_embeddings": len(updated_lbl),
     }
 
 
 @router.get("/products")
-async def list_products(db: Session = Depends(get_db)):
-    """List all registered products with their embedding counts."""
+async def list_products(
+    skip: int = 0, 
+    limit: int = 24, 
+    db: Session = Depends(get_db)
+):
+    """List products with pagination (SQL Error Fixed version).[cite: 9]"""
     labels = app_state.labels
     embedding_total = int(len(labels)) if labels is not None else 0
     label_counts: dict[str, int] = {}
     embed_products: dict[str, dict[str, object]] = {}
+    
     if labels is not None:
         for lbl in labels:
             label_str = str(lbl)
@@ -430,14 +406,25 @@ async def list_products(db: Session = Depends(get_db)):
                 }
 
     try:
+        db_total_count_row = db.execute(text("SELECT COUNT(DISTINCT item_no) as cnt FROM products")).mappings().first()
+        db_total_count = db_total_count_row["cnt"] if db_total_count_row else 0
+
+        # Fixed SQL: INNER JOIN with subquery to avoid ONLY_FULL_GROUP_BY issues[cite: 9]
         rows = db.execute(
             text(
                 """
-                SELECT id, item_no, barcd, product_name
-                FROM products
-                ORDER BY id DESC
+                SELECT p.id, p.item_no, p.barcd, p.product_name
+                FROM products p
+                INNER JOIN (
+                    SELECT MAX(id) as max_id
+                    FROM products
+                    GROUP BY item_no
+                ) sub ON p.id = sub.max_id
+                ORDER BY p.id DESC
+                LIMIT :limit OFFSET :skip
                 """
-            )
+            ),
+            {"limit": limit, "skip": skip}
         ).mappings().all()
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
@@ -459,8 +446,6 @@ async def list_products(db: Session = Depends(get_db)):
         else:
             label = f"{item_no}_{name}"
             embedding_count = label_counts.get(label, 0)
-            if embedding_count == 0:
-                embedding_count = label_counts.get(name, 0)
 
         price_row = db.execute(
             text(
@@ -488,56 +473,54 @@ async def list_products(db: Session = Depends(get_db)):
             }
         )
 
-    # Add embedding-only products not present in DB
-    for key in sorted(embed_products.keys()):
-        entry = embed_products[key]
-        item_no = entry.get("item_no")
-        name = entry.get("name")
-        products.append(
-            {
-                "id": None,
-                "item_no": item_no or "",
-                "name": str(name),
-                "price": None,
-                "barcd": None,
-                "label": f"{item_no}_{name}" if item_no else str(name),
-                "embedding_count": int(entry.get("embedding_count") or 0),
-            }
-        )
+    embed_only_keys = sorted(embed_products.keys())
+    if len(products) < limit:
+        remaining_slots = limit - len(products)
+        embed_skip = max(0, skip - db_total_count)
+        target_keys = embed_only_keys[embed_skip : embed_skip + remaining_slots]
+        
+        for key in target_keys:
+            entry = embed_products[key]
+            item_no = entry.get("item_no")
+            name = entry.get("name")
+            products.append(
+                {
+                    "id": None,
+                    "item_no": item_no or "",
+                    "name": str(name),
+                    "price": None,
+                    "barcd": None,
+                    "label": f"{item_no}_{name}" if item_no else str(name),
+                    "embedding_count": int(entry.get("embedding_count") or 0),
+                }
+            )
 
+    total_combined = db_total_count + len(embed_only_keys)
     return {
         "products": products,
         "total_embeddings": embedding_total,
+        "total_count": total_combined,
+        "has_more": skip + limit < total_combined
     }
 
 
 @router.get("/products/{item_no}/detail")
 async def get_product_detail(item_no: str, db: Session = Depends(get_db)):
-    """Fetch editable product detail for admin popup."""
     clean_item_no = (item_no or "").strip()
     if not clean_item_no:
         raise HTTPException(status_code=422, detail="Item number is required")
 
     product_row = db.execute(
-        text(
-            """
-            SELECT *
-            FROM products
-            WHERE item_no = :item_no
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ),
-        {"item_no": clean_item_no},
+        text("SELECT * FROM products WHERE item_no = :it ORDER BY id DESC LIMIT 1"),
+        {"it": clean_item_no},
     ).mappings().first()
     if not product_row:
         raise HTTPException(status_code=404, detail="Product not found")
 
     product = dict(product_row)
-    product_columns = _table_columns(db, "products")
-    stock_column = _pick_stock_column(product_columns)
-    stock_value = product.get(stock_column) if stock_column else None
-
+    p_columns = _table_columns(db, "products")
+    s_col = _pick_stock_column(p_columns)
+    
     price_row = db.execute(
         text(
             """
@@ -552,30 +535,17 @@ async def get_product_detail(item_no: str, db: Session = Depends(get_db)):
     ).mappings().first()
     price = dict(price_row) if price_row else {}
 
-    discount = None
     discount_available = _table_exists(db, "product_discounts")
-    discount_columns = _table_columns(db, "product_discounts") if discount_available else set()
-    if price.get("id") and discount_available:
-        discount = _latest_discount_row(db, int(price["id"]), discount_columns)
-
     return {
         "id": int(product["id"]),
         "item_no": str(product.get("item_no") or ""),
         "product_name": str(product.get("product_name") or ""),
         "barcd": product.get("barcd"),
-        "stock": int(stock_value) if stock_value is not None else None,
-        "stock_column": stock_column,
+        "stock": int(product.get(s_col)) if s_col and product.get(s_col) is not None else None,
         "price": int(price["price"]) if price.get("price") is not None else None,
-        "currency": str(price.get("currency") or "KRW") if price else None,
-        "price_source": price.get("source"),
-        "price_checked_at": price.get("checked_at"),
-        "is_discounted": bool(discount["is_discounted"]) if discount and discount.get("is_discounted") is not None else None,
-        "discount_rate": float(discount["discount_rate"]) if discount and discount.get("discount_rate") is not None else None,
-        "discount_amount": int(discount["discount_amount"]) if discount and discount.get("discount_amount") is not None else None,
-        "discount_updated_at": (discount or {}).get("updated_at"),
         "available_fields": {
-            "stock": stock_column is not None,
-            "discount": discount_available and "product_price_id" in discount_columns,
+            "stock": s_col is not None,
+            "discount": discount_available,
         },
     }
 
@@ -586,210 +556,80 @@ async def update_product_detail(
     payload: ProductDetailUpdate,
     db: Session = Depends(get_db),
 ):
-    """Update product metadata/price/discount directly in DB."""
     clean_item_no = (item_no or "").strip()
-    if not clean_item_no:
-        raise HTTPException(status_code=422, detail="Item number is required")
-
     product_row = db.execute(
-        text(
-            """
-            SELECT *
-            FROM products
-            WHERE item_no = :item_no
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ),
-        {"item_no": clean_item_no},
+        text("SELECT id FROM products WHERE item_no = :it ORDER BY id DESC LIMIT 1"),
+        {"it": clean_item_no},
     ).mappings().first()
     if not product_row:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    product = dict(product_row)
-    product_id = int(product["id"])
-    product_columns = _table_columns(db, "products")
-    stock_column = _pick_stock_column(product_columns)
+    product_id = int(product_row["id"])
+    s_col = _pick_stock_column(_table_columns(db, "products"))
 
-    updates: list[str] = []
-    params: dict[str, object] = {"id": product_id}
-
-    if payload.product_name is not None:
-        cleaned_name = payload.product_name.strip()
-        if not cleaned_name:
-            raise HTTPException(status_code=422, detail="product_name cannot be empty")
-        updates.append("`product_name` = :product_name")
-        params["product_name"] = cleaned_name
-
+    updates, params = [], {"id": product_id}
+    if payload.product_name:
+        updates.append("`product_name` = :nm"); params["nm"] = payload.product_name.strip()
     if payload.barcd is not None:
-        cleaned_barcd = payload.barcd.strip()
-        updates.append("`barcd` = :barcd")
-        params["barcd"] = cleaned_barcd or None
-
-    if payload.stock is not None:
-        if not stock_column:
-            raise HTTPException(status_code=422, detail="Stock column not found in products table")
-        if payload.stock < 0:
-            raise HTTPException(status_code=422, detail="stock must be >= 0")
-        updates.append(f"`{stock_column}` = :stock")
-        params["stock"] = int(payload.stock)
+        updates.append("`barcd` = :bc"); params["bc"] = payload.barcd.strip() or None
+    if payload.stock is not None and s_col:
+        updates.append(f"`{s_col}` = :st"); params["st"] = int(payload.stock)
 
     if updates:
-        if "updated_at" in product_columns:
-            updates.append("`updated_at` = CURRENT_TIMESTAMP")
-        db.execute(
-            text(f"UPDATE products SET {', '.join(updates)} WHERE id = :id"),
-            params,
-        )
+        db.execute(text(f"UPDATE products SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = :id"), params)
 
-    latest_price_id: int | None = None
-    latest_price_row = db.execute(
-        text(
-            """
-            SELECT id, price, currency
-            FROM product_prices
-            WHERE product_id = :pid
-            ORDER BY checked_at DESC, id DESC
-            LIMIT 1
-            """
-        ),
+    l_pr_row = db.execute(
+        text("SELECT id, price, currency FROM product_prices WHERE product_id = :pid ORDER BY checked_at DESC, id DESC LIMIT 1"),
         {"pid": product_id},
     ).mappings().first()
-    if latest_price_row:
-        latest_price_id = int(latest_price_row["id"])
+    l_pr_id = int(l_pr_row["id"]) if l_pr_row else None
 
     if payload.price is not None:
-        if payload.price <= 0:
-            raise HTTPException(status_code=422, detail="price must be > 0")
-        currency = str((latest_price_row or {}).get("currency") or "KRW")
-        inserted = db.execute(
+        res = db.execute(
             text(
                 """
                 INSERT INTO product_prices (product_id, price, currency, source, checked_at, created_at)
-                VALUES (:product_id, :price, :currency, 'admin_edit', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:pid, :pr, :cu, 'admin_edit', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """
             ),
-            {
-                "product_id": product_id,
-                "price": int(payload.price),
-                "currency": currency,
-            },
+            {"pid": product_id, "pr": int(payload.price), "cu": str(l_pr_row.get("currency", "KRW") if l_pr_row else "KRW")},
         )
-        latest_price_id = int(inserted.lastrowid or 0) or latest_price_id
+        l_pr_id = int(res.lastrowid or 0) or l_pr_id
 
-    wants_discount_update = (
-        payload.is_discounted is not None
-        or payload.discount_rate is not None
-        or payload.discount_amount is not None
-    )
-    if wants_discount_update:
-        if latest_price_id is None:
-            raise HTTPException(status_code=422, detail="No price row exists for this product")
-        if not _table_exists(db, "product_discounts"):
-            raise HTTPException(status_code=422, detail="product_discounts table not found")
-        discount_columns = _table_columns(db, "product_discounts")
-        _insert_discount_row(
-            db=db,
-            product_price_id=int(latest_price_id),
-            payload=payload,
-            discount_columns=discount_columns,
-        )
+    if (payload.is_discounted is not None or payload.discount_rate is not None or payload.discount_amount is not None) and l_pr_id:
+        _insert_discount_row(db, l_pr_id, payload, _table_columns(db, "product_discounts"))
 
-    try:
-        db.commit()
-    except SQLAlchemyError as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
-
+    db.commit()
     return {"status": "updated", "item_no": clean_item_no}
 
 
 @router.delete("/products/{item_no}")
 async def delete_product(item_no: str, db: Session = Depends(get_db)):
-    """Delete a product from catalog and embeddings by item_no."""
     clean_item_no = (item_no or "").strip()
-    if not clean_item_no:
-        raise HTTPException(status_code=422, detail="Item number is required")
-
-    try:
-        rows = db.execute(
-            text(
-                """
-                SELECT id, product_name
-                FROM products
-                WHERE item_no = :item_no
-                ORDER BY id DESC
-                """
-            ),
-            {"item_no": clean_item_no},
-        ).mappings().all()
-    except SQLAlchemyError as exc:
-        raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
-
+    rows = db.execute(
+        text("SELECT id, product_name FROM products WHERE item_no = :it"),
+        {"it": clean_item_no}
+    ).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    product_ids = [int(r["id"]) for r in rows]
-    product_names = {str(r["product_name"]) for r in rows if r.get("product_name")}
+    p_ids = [int(r["id"]) for r in rows]
+    p_names = {str(r["product_name"]) for r in rows if r.get("product_name")}
 
-    # Update embeddings + FAISS index
-    removed_embeddings = 0
+    rem_emb = 0
     async with app_state.index_rwlock.writer_lock:
         if os.path.exists(config.EMBEDDINGS_PATH) and os.path.exists(config.LABELS_PATH):
-            embeddings = np.load(config.EMBEDDINGS_PATH).astype(np.float32)
-            labels = np.load(config.LABELS_PATH, allow_pickle=True)
-
-            if embeddings.shape[0] != len(labels):
-                raise HTTPException(
-                    status_code=500, detail="embeddings.npy and labels.npy mismatch"
-                )
-
-            keep_mask = []
-            for lbl in labels:
-                label_str = str(lbl)
-                should_remove = label_str.startswith(f"{clean_item_no}_")
-                if not should_remove and label_str in product_names:
-                    should_remove = True
-                keep_mask.append(not should_remove)
-
-            keep_mask = np.array(keep_mask, dtype=bool)
-            removed_embeddings = int((~keep_mask).sum())
-
-            updated_emb = embeddings[keep_mask]
-            updated_lbl = labels[keep_mask]
-
-            np.save(config.EMBEDDINGS_PATH, updated_emb)
-            np.save(config.LABELS_PATH, updated_lbl)
-
-            bundle = app_state.model_bundle
-            weighted_db = _recompute_weighted_db(
-                updated_emb, bundle["dino_dim"], bundle["clip_dim"]
-            )
-            app_state.weighted_db = weighted_db
-            app_state.labels = updated_lbl
-
+            emb, lbl = np.load(config.EMBEDDINGS_PATH), np.load(config.LABELS_PATH, allow_pickle=True)
+            keep = np.array([not (str(l).startswith(f"{clean_item_no}_") or str(l) in p_names) for l in lbl], dtype=bool)
+            rem_emb = int((~keep).sum())
+            np.save(config.EMBEDDINGS_PATH, emb[keep]); np.save(config.LABELS_PATH, lbl[keep])
+            app_state.weighted_db = _recompute_weighted_db(emb[keep], app_state.model_bundle["dino_dim"], app_state.model_bundle["clip_dim"])
+            app_state.labels = lbl[keep]
             from checkout_core.inference import build_or_load_index
+            app_state.faiss_index = build_or_load_index(app_state.weighted_db, config.FAISS_INDEX_PATH)
 
-            app_state.faiss_index = build_or_load_index(weighted_db, config.FAISS_INDEX_PATH)
-
-    try:
-        for pid in product_ids:
-            db.execute(
-                text("DELETE FROM product_prices WHERE product_id = :pid"),
-                {"pid": pid},
-            )
-        db.execute(
-            text("DELETE FROM products WHERE item_no = :item_no"),
-            {"item_no": clean_item_no},
-        )
-        db.commit()
-    except SQLAlchemyError as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
-
-    return {
-        "status": "deleted",
-        "item_no": clean_item_no,
-        "removed_embeddings": removed_embeddings,
-        "removed_products": len(product_ids),
-    }
+    for pid in p_ids:
+        db.execute(text("DELETE FROM product_prices WHERE product_id = :pid"), {"pid": pid})
+    db.execute(text("DELETE FROM products WHERE item_no = :it"), {"it": clean_item_no})
+    db.commit()
+    return {"status": "deleted", "item_no": clean_item_no, "removed_embeddings": rem_emb}
