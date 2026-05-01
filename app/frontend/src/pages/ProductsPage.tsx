@@ -508,21 +508,33 @@ export default function ProductsPage() {
         ) : data?.products.length === 0 ? (
           <p className="text-sm text-[var(--color-text-muted)]">등록된 상품이 없습니다.</p>
         ) : (
-          <ul className="divide-y divide-[var(--color-border)]">
+          <ul className="divide-y divide-[var(--color-border)] max-h-[520px] overflow-y-auto">
             {data?.products.map((p) => (
               <li
                 key={p.item_no}
                 className="py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm"
               >
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedItemNo(p.item_no)}
-                    className="font-medium hover:underline text-left"
-                  >
-                    {p.name}
-                  </button>
-                  <p className="text-xs text-[var(--color-text-muted)]">상품번호: {p.item_no}</p>
+                <div className="flex items-center gap-3">
+                  {p.picture ? (
+                    <img
+                      src={p.picture}
+                      alt={p.name}
+                      className="w-12 h-12 rounded-lg object-cover flex-shrink-0 bg-gray-100"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-lg bg-gray-100 flex-shrink-0" />
+                  )}
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedItemNo(p.item_no)}
+                      className="font-medium hover:underline text-left"
+                    >
+                      {p.name}
+                    </button>
+                    <p className="text-xs text-[var(--color-text-muted)]">상품번호: {p.item_no}</p>
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <button

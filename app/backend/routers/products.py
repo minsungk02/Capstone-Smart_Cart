@@ -73,56 +73,36 @@ def _pick_stock_column(product_columns: set[str]) -> str | None:
     return None
 
 
-def _latest_discount_row(
+def _latest_price_discount(
     db: Session,
     product_price_id: int,
-    discount_columns: set[str],
+    price_columns: set[str],
 ) -> dict[str, object] | None:
-    if "product_price_id" not in discount_columns:
-        return None
-
+    """discount 컬럼을 product_prices에서 직접 조회."""
     select_cols = [
-        c
-        for c in (
-            "id",
-            "is_discounted",
-            "discount_rate",
-            "discount_amount",
-            "started_at",
-            "ended_at",
-            "updated_at",
-            "created_at",
-        )
-        if c in discount_columns
+        c for c in ("id", "is_discounted", "discount_rate", "discount_amount", "created_at")
+        if c in price_columns
     ]
-    if not select_cols:
+    if not {"is_discounted", "discount_rate", "discount_amount"} & price_columns:
         return None
-
-    order_cols = [c for c in ("updated_at", "created_at", "id") if c in discount_columns]
-    if not order_cols:
-        order_cols = [select_cols[0]]
 
     sql = (
         f"SELECT {', '.join(f'`{col}`' for col in select_cols)} "
-        "FROM product_discounts "
-        "WHERE `product_price_id` = :ppid "
-        f"ORDER BY {', '.join(f'`{col}` DESC' for col in order_cols)} "
+        "FROM product_prices "
+        "WHERE `id` = :ppid "
         "LIMIT 1"
     )
-
     row = db.execute(text(sql), {"ppid": int(product_price_id)}).mappings().first()
     return dict(row) if row else None
 
 
-def _insert_discount_row(
+def _update_price_discount(
     db: Session,
     product_price_id: int,
     payload: ProductDetailUpdate,
-    discount_columns: set[str],
+    price_columns: set[str],
 ) -> None:
-    if "product_price_id" not in discount_columns:
-        raise HTTPException(status_code=422, detail="product_discounts schema missing product_price_id")
-
+    """product_prices 행의 discount 컬럼을 UPDATE."""
     discount_rate = None
     if payload.discount_rate is not None:
         if payload.discount_rate < 0:
@@ -140,36 +120,24 @@ def _insert_discount_row(
     else:
         is_discounted_value = 1 if (discount_rate or 0) > 0 or (discount_amount or 0) > 0 else 0
 
-    values: dict[str, object] = {"product_price_id": int(product_price_id)}
-    if "is_discounted" in discount_columns:
-        values["is_discounted"] = is_discounted_value
-    if "discount_rate" in discount_columns:
-        values["discount_rate"] = discount_rate
-    if "discount_amount" in discount_columns:
-        values["discount_amount"] = discount_amount
+    updates: list[str] = []
+    params: dict[str, object] = {"ppid": int(product_price_id)}
 
-    cols: list[str] = []
-    exprs: list[str] = []
-    params: dict[str, object] = {}
+    if "is_discounted" in price_columns:
+        updates.append("`is_discounted` = :is_discounted")
+        params["is_discounted"] = is_discounted_value
+    if "discount_rate" in price_columns:
+        updates.append("`discount_rate` = :discount_rate")
+        params["discount_rate"] = discount_rate
+    if "discount_amount" in price_columns:
+        updates.append("`discount_amount` = :discount_amount")
+        params["discount_amount"] = discount_amount
 
-    for col, value in values.items():
-        cols.append(f"`{col}`")
-        key = f"v_{col}"
-        exprs.append(f":{key}")
-        params[key] = value
-
-    if "created_at" in discount_columns:
-        cols.append("`created_at`")
-        exprs.append("CURRENT_TIMESTAMP")
-    if "updated_at" in discount_columns:
-        cols.append("`updated_at`")
-        exprs.append("CURRENT_TIMESTAMP")
-
-    sql = (
-        f"INSERT INTO product_discounts ({', '.join(cols)}) "
-        f"VALUES ({', '.join(exprs)})"
-    )
-    db.execute(text(sql), params)
+    if updates:
+        db.execute(
+            text(f"UPDATE product_prices SET {', '.join(updates)} WHERE `id` = :ppid"),
+            params,
+        )
 
 
 def _pil_to_bgr(img: Image.Image) -> np.ndarray:
@@ -413,6 +381,7 @@ async def list_products(
         rows = db.execute(
             text(
                 """
+<<<<<<< HEAD
                 SELECT p.id, p.item_no, p.barcd, p.product_name
                 FROM products p
                 INNER JOIN (
@@ -422,6 +391,11 @@ async def list_products(
                 ) sub ON p.id = sub.max_id
                 ORDER BY p.id DESC
                 LIMIT :limit OFFSET :skip
+=======
+                SELECT id, item_no, barcd, product_name, picture
+                FROM products
+                ORDER BY id DESC
+>>>>>>> 270f3d488d0898b40970aabc0b73138e0647890c
                 """
             ),
             {"limit": limit, "skip": skip}
@@ -468,6 +442,7 @@ async def list_products(
                 "name": name,
                 "price": price,
                 "barcd": row.get("barcd"),
+                "picture": str(row.get("picture") or "").strip() or None,
                 "label": f"{item_no}_{name}",
                 "embedding_count": int(embedding_count),
             }
@@ -535,7 +510,16 @@ async def get_product_detail(item_no: str, db: Session = Depends(get_db)):
     ).mappings().first()
     price = dict(price_row) if price_row else {}
 
+<<<<<<< HEAD
     discount_available = _table_exists(db, "product_discounts")
+=======
+    price_columns = _table_columns(db, "product_prices")
+    discount = None
+    if price.get("id"):
+        discount = _latest_price_discount(db, int(price["id"]), price_columns)
+    discount_available = bool({"is_discounted", "discount_rate"} & price_columns)
+
+>>>>>>> 270f3d488d0898b40970aabc0b73138e0647890c
     return {
         "id": int(product["id"]),
         "item_no": str(product.get("item_no") or ""),
@@ -543,8 +527,20 @@ async def get_product_detail(item_no: str, db: Session = Depends(get_db)):
         "barcd": product.get("barcd"),
         "stock": int(product.get(s_col)) if s_col and product.get(s_col) is not None else None,
         "price": int(price["price"]) if price.get("price") is not None else None,
+<<<<<<< HEAD
         "available_fields": {
             "stock": s_col is not None,
+=======
+        "currency": str(price.get("currency") or "KRW") if price else None,
+        "price_source": price.get("source"),
+        "price_checked_at": price.get("checked_at"),
+        "is_discounted": bool(discount["is_discounted"]) if discount and discount.get("is_discounted") is not None else None,
+        "discount_rate": float(discount["discount_rate"]) if discount and discount.get("discount_rate") is not None else None,
+        "discount_amount": int(discount["discount_amount"]) if discount and discount.get("discount_amount") is not None else None,
+        "discount_updated_at": None,
+        "available_fields": {
+            "stock": stock_column is not None,
+>>>>>>> 270f3d488d0898b40970aabc0b73138e0647890c
             "discount": discount_available,
         },
     }
@@ -596,8 +592,32 @@ async def update_product_detail(
         )
         l_pr_id = int(res.lastrowid or 0) or l_pr_id
 
+<<<<<<< HEAD
     if (payload.is_discounted is not None or payload.discount_rate is not None or payload.discount_amount is not None) and l_pr_id:
         _insert_discount_row(db, l_pr_id, payload, _table_columns(db, "product_discounts"))
+=======
+    wants_discount_update = (
+        payload.is_discounted is not None
+        or payload.discount_rate is not None
+        or payload.discount_amount is not None
+    )
+    if wants_discount_update:
+        if latest_price_id is None:
+            raise HTTPException(status_code=422, detail="No price row exists for this product")
+        price_columns = _table_columns(db, "product_prices")
+        _update_price_discount(
+            db=db,
+            product_price_id=int(latest_price_id),
+            payload=payload,
+            price_columns=price_columns,
+        )
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
+>>>>>>> 270f3d488d0898b40970aabc0b73138e0647890c
 
     db.commit()
     return {"status": "updated", "item_no": clean_item_no}

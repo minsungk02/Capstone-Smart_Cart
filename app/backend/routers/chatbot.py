@@ -714,6 +714,23 @@ def _query_catalog_products(
         if not normalized_rows and len(groups) > 1:
             fallback_where = f"WHERE {' OR '.join(groups)}"
             normalized_rows = _run_catalog_query(fallback_where)
+        # FULLTEXT 폴백: LIKE 검색 결과 없을 때 ft_products_name_company 인덱스 활용
+        if not normalized_rows and terms:
+            ft_query = " ".join(f"+{t}*" for t in terms if len(t) >= 2)
+            if ft_query:
+                try:
+                    ft_sql = (
+                        "SELECT p.*, "
+                        "MATCH(p.`product_name`, p.`company`) AGAINST(:ft IN BOOLEAN MODE) AS _ft_score "
+                        "FROM products p "
+                        "WHERE MATCH(p.`product_name`, p.`company`) AGAINST(:ft IN BOOLEAN MODE) "
+                        "ORDER BY _ft_score DESC "
+                        "LIMIT :limit"
+                    )
+                    ft_rows = db.execute(text(ft_sql), {"ft": ft_query, "limit": safe_limit}).mappings().all()
+                    normalized_rows = [dict(r) for r in ft_rows]
+                except SQLAlchemyError:
+                    pass
     except SQLAlchemyError:
         return [], terms
     if "item_no" not in product_columns:
@@ -745,7 +762,10 @@ def _latest_price_row(
         return {}
 
     select_cols = [
-        col for col in ("id", "price", "currency", "source", "checked_at", "created_at")
+        col for col in (
+            "id", "price", "currency", "source", "checked_at",
+            "is_discounted", "discount_rate", "discount_amount", "created_at",
+        )
         if col in price_columns
     ]
     if "price" not in select_cols:
@@ -769,33 +789,22 @@ def _latest_price_row(
 def _latest_discount_row(
     db: Session,
     product_price_id: int,
-    discount_columns: list[str],
+    price_columns: list[str],
 ) -> dict[str, Any]:
-    if not discount_columns:
+    """product_prices 테이블에서 discount 컬럼 직접 조회 (product_discounts 제거됨)."""
+    if not price_columns:
         return {}
-    if "product_price_id" not in discount_columns:
-        return {}
-    if (
-        "is_discounted" not in discount_columns
-        and "discount_rate" not in discount_columns
-        and "discount_amount" not in discount_columns
-    ):
+    if not {"is_discounted", "discount_rate", "discount_amount"} & set(price_columns):
         return {}
 
     select_cols = [
-        col
-        for col in ("id", "is_discounted", "discount_rate", "discount_amount", "started_at", "ended_at", "updated_at", "created_at")
-        if col in discount_columns
+        col for col in ("id", "is_discounted", "discount_rate", "discount_amount")
+        if col in price_columns
     ]
-    order_cols = [col for col in ("updated_at", "created_at", "id") if col in discount_columns]
-    if not order_cols:
-        order_cols = [select_cols[0]]
-
     sql = (
         f"SELECT {', '.join(f'`{col}`' for col in select_cols)} "
-        "FROM product_discounts "
-        "WHERE `product_price_id` = :ppid "
-        f"ORDER BY {', '.join(f'`{col}` DESC' for col in order_cols)} "
+        "FROM product_prices "
+        "WHERE `id` = :ppid "
         "LIMIT 1"
     )
     row = db.execute(text(sql), {"ppid": int(product_price_id)}).mappings().first()
@@ -844,7 +853,7 @@ def _catalog_summary(
             discount_row = db.execute(
                 text(
                     "SELECT COUNT(*) AS cnt "
-                    "FROM product_discounts "
+                    "FROM product_prices "
                     "WHERE `is_discounted` = 1"
                 )
             ).mappings().first()
@@ -856,22 +865,19 @@ def _catalog_summary(
 
 
 def _category_corner_snapshot(db: Session) -> dict[str, dict[str, Any]]:
+    """category_corner_map에서 직접 조회 (store_corners 병합됨)."""
     map_columns = _table_columns(db, "category_corner_map")
-    corner_columns = _table_columns(db, "store_corners")
-    if not map_columns or not corner_columns:
+    if not map_columns:
         return {}
-    if not {"category_l", "corner_id"}.issubset(set(map_columns)):
-        return {}
-    if not {"id", "corner_no"}.issubset(set(corner_columns)):
+    if not {"category_l", "corner_no"}.issubset(set(map_columns)):
         return {}
 
     try:
         rows = db.execute(
             text(
-                "SELECT m.category_l, c.corner_no, c.corner_name "
-                "FROM category_corner_map m "
-                "JOIN store_corners c ON c.id = m.corner_id "
-                "ORDER BY c.corner_no ASC, m.category_l ASC"
+                "SELECT category_l, corner_no, corner_name "
+                "FROM category_corner_map "
+                "ORDER BY corner_no ASC, category_l ASC"
             )
         ).mappings().all()
     except SQLAlchemyError:
@@ -896,41 +902,34 @@ def _discount_snapshot(
     question: str,
     product_columns: list[str],
     price_columns: list[str],
-    discount_columns: list[str],
 ) -> list[dict[str, Any]]:
+    """할인 스냅샷: product_prices.is_discounted 직접 사용 (product_discounts 병합됨)."""
     if not any(token in question for token in _DISCOUNT_QUERY_TOKENS):
         return []
     required = {"id", "item_no", "product_name"}
     if not required.issubset(set(product_columns)):
         return []
-    if not {"id", "product_id"}.issubset(set(price_columns)):
-        return []
-    if "product_price_id" not in discount_columns:
+    if not {"id", "product_id", "is_discounted"}.issubset(set(price_columns)):
         return []
 
     select_cols = ["p.`item_no` AS item_no", "p.`product_name` AS product_name"]
-    if "discount_rate" in discount_columns:
-        select_cols.append("pd.`discount_rate` AS discount_rate")
-    if "discount_amount" in discount_columns:
-        select_cols.append("pd.`discount_amount` AS discount_amount")
-    if "is_discounted" in discount_columns:
-        where_clause = "WHERE pd.`is_discounted` = 1"
-    else:
-        where_clause = ""
+    if "discount_rate" in price_columns:
+        select_cols.append("pp.`discount_rate` AS discount_rate")
+    if "discount_amount" in price_columns:
+        select_cols.append("pp.`discount_amount` AS discount_amount")
 
     order_terms: list[str] = []
-    if "discount_rate" in discount_columns:
-        order_terms.append("COALESCE(pd.`discount_rate`, 0) DESC")
-    if "discount_amount" in discount_columns:
-        order_terms.append("COALESCE(pd.`discount_amount`, 0) DESC")
+    if "discount_rate" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_rate`, 0) DESC")
+    if "discount_amount" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_amount`, 0) DESC")
     order_terms.append("p.`id` DESC")
 
     sql = (
         f"SELECT {', '.join(select_cols)} "
         "FROM products p "
         "JOIN product_prices pp ON pp.`product_id` = p.`id` "
-        "JOIN product_discounts pd ON pd.`product_price_id` = pp.`id` "
-        f"{where_clause} "
+        "WHERE pp.`is_discounted` = 1 "
         f"ORDER BY {', '.join(order_terms)} "
         "LIMIT :limit"
     )
@@ -1109,7 +1108,6 @@ def _build_catalog_context(db: Session, question: str) -> dict[str, Any]:
         return {"available": False}
 
     price_columns = _table_columns(db, "product_prices")
-    discount_columns = _table_columns(db, "product_discounts")
 
     product_rows, terms = _query_catalog_products(db, question, product_columns, _MAX_CATALOG_MATCH_ROWS)
     matched_rows: list[dict[str, Any]] = []
@@ -1133,16 +1131,11 @@ def _build_catalog_context(db: Session, question: str) -> dict[str, Any]:
                 compact_row["latest_price_source"] = _compact_prompt_value(price_row.get("source"))
                 compact_row["latest_price_checked_at"] = _compact_prompt_value(price_row.get("checked_at"))
 
-                if discount_columns and price_row.get("id") is not None:
-                    try:
-                        discount_row = _latest_discount_row(db, int(price_row["id"]), discount_columns)
-                    except SQLAlchemyError:
-                        discount_row = {}
-                    if discount_row:
-                        compact_row["is_discounted"] = _compact_prompt_value(discount_row.get("is_discounted"))
-                        compact_row["discount_rate"] = _compact_prompt_value(discount_row.get("discount_rate"))
-                        compact_row["discount_amount"] = _compact_prompt_value(discount_row.get("discount_amount"))
-                        compact_row["discount_updated_at"] = _compact_prompt_value(discount_row.get("updated_at"))
+                # discount 컬럼이 product_prices에 통합됐으므로 price_row에서 직접 읽음
+                for disc_col in ("is_discounted", "discount_rate", "discount_amount"):
+                    val = _compact_prompt_value(price_row.get(disc_col))
+                    if val is not None:
+                        compact_row[disc_col] = val
 
         matched_rows.append({k: v for k, v in compact_row.items() if v is not None})
 
@@ -1151,15 +1144,14 @@ def _build_catalog_context(db: Session, question: str) -> dict[str, Any]:
         "schema": {
             "products": product_columns,
             "product_prices": price_columns,
-            "product_discounts": discount_columns,
         },
-        "summary": _catalog_summary(db, product_columns, discount_columns),
+        "summary": _catalog_summary(db, product_columns, price_columns),
         "search_terms": terms,
         "matched_products": matched_rows[:_MAX_CATALOG_MATCH_ROWS],
         "corner_map": _category_corner_snapshot(db),
     }
 
-    discount_rows = _discount_snapshot(db, question, product_columns, price_columns, discount_columns)
+    discount_rows = _discount_snapshot(db, question, product_columns, price_columns)
     if discount_rows:
         context["discount_snapshot"] = discount_rows
 

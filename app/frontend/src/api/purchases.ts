@@ -5,6 +5,7 @@ export interface PurchaseItem {
   count: number;
   unit_price?: number | null;
   line_total?: number | null;
+  picture?: string | null;
 }
 
 export interface PurchaseResponse {

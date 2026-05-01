@@ -2,8 +2,8 @@
 
 Creates the minimum schema needed by this repository:
 - SQLAlchemy models: users, purchase_history
-- Catalog tables used by pricing service: products, product_prices, product_discounts
-- Store layout mapping tables: store_corners, category_corner_map
+- Catalog tables used by pricing service: products, product_prices (discount 컬럼 포함)
+- Store layout mapping table: category_corner_map (corner_no/corner_name 직접 포함)
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ REQUIRED_TABLES = (
     "purchase_history",
     "products",
     "product_prices",
-    "product_discounts",
-    "store_corners",
     "category_corner_map",
 )
 
@@ -68,68 +66,42 @@ MYSQL_SCHEMA_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS product_prices (
-        id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        product_id  BIGINT UNSIGNED NOT NULL,
-        price       INT             NOT NULL,
-        currency    CHAR(3)         NOT NULL DEFAULT 'KRW',
-        source      VARCHAR(64)     DEFAULT NULL,
-        checked_at  DATETIME(6)     NOT NULL,
-        query_type  VARCHAR(32)     DEFAULT NULL,
-        query_value VARCHAR(255)    DEFAULT NULL,
-        mall_name   VARCHAR(128)    DEFAULT NULL,
-        match_title VARCHAR(512)    DEFAULT NULL,
-        created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        product_id      BIGINT UNSIGNED NOT NULL,
+        price           INT             NOT NULL,
+        currency        CHAR(3)         NOT NULL DEFAULT 'KRW',
+        source          VARCHAR(64)     DEFAULT NULL,
+        checked_at      DATETIME(6)     NOT NULL,
+        query_type      VARCHAR(32)     DEFAULT NULL,
+        query_value     VARCHAR(255)    DEFAULT NULL,
+        mall_name       VARCHAR(128)    DEFAULT NULL,
+        match_title     VARCHAR(512)    DEFAULT NULL,
+        is_discounted   TINYINT(1)      NOT NULL DEFAULT 0,
+        discount_rate   DECIMAL(5,2)    DEFAULT NULL,
+        discount_amount INT             DEFAULT NULL,
+        created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY uq_product_prices_snapshot (product_id, checked_at, source, price),
         KEY idx_product_prices_product_checked (product_id, checked_at DESC),
         KEY idx_product_prices_checked_at (checked_at DESC),
         KEY idx_product_prices_source_checked (source, checked_at DESC),
+        KEY idx_product_prices_is_discounted (is_discounted),
         CONSTRAINT fk_product_prices_product_id
             FOREIGN KEY (product_id) REFERENCES products(id)
             ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     """,
     """
-    CREATE TABLE IF NOT EXISTS product_discounts (
-        id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        product_price_id BIGINT UNSIGNED NOT NULL,
-        is_discounted    TINYINT(1)      NOT NULL DEFAULT 0,
-        discount_rate    DECIMAL(5,2)    DEFAULT NULL,
-        discount_amount  INT             DEFAULT NULL,
-        created_at       TIMESTAMP       NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at       TIMESTAMP       NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY uq_product_discounts_price (product_price_id),
-        KEY idx_product_discounts_is_discounted (is_discounted),
-        CONSTRAINT fk_product_discounts_price
-            FOREIGN KEY (product_price_id) REFERENCES product_prices(id)
-            ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS store_corners (
-        id          BIGINT   NOT NULL AUTO_INCREMENT,
-        corner_no   INT      NOT NULL,
-        corner_name VARCHAR(100) NULL,
-        created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY uq_store_corners_corner_no (corner_no)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-    """
     CREATE TABLE IF NOT EXISTS category_corner_map (
-        id         BIGINT       NOT NULL AUTO_INCREMENT,
-        category_l VARCHAR(255) NOT NULL,
-        corner_id  BIGINT       NOT NULL,
-        created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        id          BIGINT       NOT NULL AUTO_INCREMENT,
+        category_l  VARCHAR(255) NOT NULL,
+        corner_no   INT          NOT NULL,
+        corner_name VARCHAR(100) NULL,
+        created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY uq_category_corner_map_category_l (category_l),
-        INDEX idx_category_corner_map_corner_id (corner_id),
-        CONSTRAINT fk_category_corner_map_corner
-            FOREIGN KEY (corner_id) REFERENCES store_corners(id)
-            ON DELETE CASCADE
+        KEY idx_category_corner_map_corner_no (corner_no)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 )
@@ -166,17 +138,20 @@ SQLITE_SCHEMA_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS product_prices (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id  INTEGER NOT NULL,
-        price       INTEGER NOT NULL,
-        currency    TEXT    NOT NULL DEFAULT 'KRW',
-        source      TEXT    DEFAULT NULL,
-        checked_at  TEXT    NOT NULL,
-        query_type  TEXT    DEFAULT NULL,
-        query_value TEXT    DEFAULT NULL,
-        mall_name   TEXT    DEFAULT NULL,
-        match_title TEXT    DEFAULT NULL,
-        created_at  TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id      INTEGER NOT NULL,
+        price           INTEGER NOT NULL,
+        currency        TEXT    NOT NULL DEFAULT 'KRW',
+        source          TEXT    DEFAULT NULL,
+        checked_at      TEXT    NOT NULL,
+        query_type      TEXT    DEFAULT NULL,
+        query_value     TEXT    DEFAULT NULL,
+        mall_name       TEXT    DEFAULT NULL,
+        match_title     TEXT    DEFAULT NULL,
+        is_discounted   INTEGER NOT NULL DEFAULT 0,
+        discount_rate   REAL    DEFAULT NULL,
+        discount_amount INTEGER DEFAULT NULL,
+        created_at      TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
     )
     """,
@@ -185,43 +160,22 @@ SQLITE_SCHEMA_STATEMENTS = (
     ON product_prices (product_id, checked_at)
     """,
     """
-    CREATE TABLE IF NOT EXISTS product_discounts (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_price_id INTEGER NOT NULL UNIQUE,
-        is_discounted    INTEGER NOT NULL DEFAULT 0,
-        discount_rate    REAL    DEFAULT NULL,
-        discount_amount  INTEGER DEFAULT NULL,
-        created_at       TEXT    DEFAULT (CURRENT_TIMESTAMP),
-        updated_at       TEXT    DEFAULT (CURRENT_TIMESTAMP),
-        FOREIGN KEY(product_price_id) REFERENCES product_prices(id) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_product_discounts_is_discounted
-    ON product_discounts (is_discounted)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS store_corners (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        corner_no  INTEGER NOT NULL UNIQUE,
-        corner_name TEXT,
-        created_at TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-        updated_at TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-    )
+    CREATE INDEX IF NOT EXISTS idx_product_prices_is_discounted
+    ON product_prices (is_discounted)
     """,
     """
     CREATE TABLE IF NOT EXISTS category_corner_map (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        category_l TEXT    NOT NULL UNIQUE,
-        corner_id  INTEGER NOT NULL,
-        created_at TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-        updated_at TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-        FOREIGN KEY(corner_id) REFERENCES store_corners(id) ON DELETE CASCADE
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_l  TEXT    NOT NULL UNIQUE,
+        corner_no   INTEGER NOT NULL,
+        corner_name TEXT    DEFAULT NULL,
+        created_at  TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+        updated_at  TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP)
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_category_corner_map_corner_id
-    ON category_corner_map (corner_id)
+    CREATE INDEX IF NOT EXISTS idx_category_corner_map_corner_no
+    ON category_corner_map (corner_no)
     """,
 )
 
@@ -281,6 +235,7 @@ def _seed_corner_mappings() -> None:
 
     Existing mappings are preserved. Missing categories are assigned to the next
     available corner number while honoring DEFAULT_CATEGORY_CORNERS first.
+    corner_no and corner_name are stored directly in category_corner_map.
     """
     with engine.begin() as conn:
         products_columns = {
@@ -319,33 +274,6 @@ def _seed_corner_mappings() -> None:
             used_corner_nos.add(next_corner_no)
             next_corner_no += 1
 
-        corner_id_by_no: dict[int, int] = {}
-        existing_corners = conn.execute(
-            text("SELECT id, corner_no FROM store_corners")
-        ).mappings().all()
-        for row in existing_corners:
-            corner_id_by_no[int(row["corner_no"])] = int(row["id"])
-
-        for corner_no in sorted(set(assigned.values())):
-            if corner_no in corner_id_by_no:
-                continue
-            conn.execute(
-                text(
-                    "INSERT INTO store_corners (corner_no, corner_name, created_at, updated_at) "
-                    "VALUES (:corner_no, :corner_name, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-                ),
-                {
-                    "corner_no": int(corner_no),
-                    "corner_name": f"{int(corner_no)}번 코너",
-                },
-            )
-            corner_row = conn.execute(
-                text("SELECT id FROM store_corners WHERE corner_no = :corner_no LIMIT 1"),
-                {"corner_no": int(corner_no)},
-            ).mappings().first()
-            if corner_row and corner_row.get("id") is not None:
-                corner_id_by_no[int(corner_no)] = int(corner_row["id"])
-
         existing_maps = conn.execute(
             text("SELECT category_l FROM category_corner_map")
         ).mappings().all()
@@ -358,17 +286,16 @@ def _seed_corner_mappings() -> None:
         for category, corner_no in assigned.items():
             if category in mapped_categories:
                 continue
-            corner_id = corner_id_by_no.get(int(corner_no))
-            if not corner_id:
-                continue
             conn.execute(
                 text(
-                    "INSERT INTO category_corner_map (category_l, corner_id, created_at, updated_at) "
-                    "VALUES (:category_l, :corner_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    "INSERT INTO category_corner_map "
+                    "(category_l, corner_no, corner_name, created_at, updated_at) "
+                    "VALUES (:category_l, :corner_no, :corner_name, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ),
                 {
                     "category_l": category,
-                    "corner_id": int(corner_id),
+                    "corner_no": int(corner_no),
+                    "corner_name": f"{int(corner_no)}번 코너",
                 },
             )
 
@@ -411,7 +338,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Bootstrap/check EBRCS DB schema "
-            "(users, purchase_history, products, product_prices, product_discounts, store_corners, category_corner_map)."
+            "(users, purchase_history, products, product_prices, category_corner_map)."
         )
     )
     parser.add_argument(

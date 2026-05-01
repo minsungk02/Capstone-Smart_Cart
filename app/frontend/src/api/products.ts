@@ -4,8 +4,14 @@ export interface Product {
   id?: number | null;
   item_no: string;
   name: string;
+<<<<<<< HEAD
   price?: number | null;
   barcd?: string | null;
+=======
+  price?: number;
+  barcd?: string;
+  picture?: string | null;
+>>>>>>> 270f3d488d0898b40970aabc0b73138e0647890c
   embedding_count: number;
   label?: string;
   picture?: string | null;
