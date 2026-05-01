@@ -8,8 +8,10 @@ import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import MyPage from "./pages/MyPage";
 import AdminPurchasesPage from "./pages/AdminPurchasesPage";
+import AdminDashboardPage from "./pages/AdminDashboardPage";
 import ChatbotWidget from "./components/ChatbotWidget";
 import { useAuthStore } from "./stores/authStore";
+import { useUIStore } from "./stores/uiStore";
 import { shouldRedirectForAdminRoute } from "./routing/guards";
 
 // User menu items
@@ -35,9 +37,11 @@ export default function App() {
   const { user, clearAuth, isAuthenticated, isAdmin } = useAuthStore();
   const isAdminUser = isAdmin();
   const shouldRenderChatbot = true;
-  const shouldUseMobileHeaderChatbot = !isCheckoutPage;
+  // Checkout page renders its own sheet-aware FAB; everywhere else uses the standard FAB.
+  const hideChatbotFab = isCheckoutPage;
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const [isChatbotOpen, setIsChatbotOpen] = useState(false);
+  const isChatbotOpen = useUIStore((s) => s.isChatbotOpen);
+  const setChatbotOpen = useUIStore((s) => s.setChatbotOpen);
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
 
@@ -92,7 +96,16 @@ export default function App() {
   // Reset transient overlays when route changes to avoid mobile transition glitches.
   useEffect(() => {
     setIsProfileMenuOpen(false);
-    setIsChatbotOpen(false);
+    setChatbotOpen(false);
+  }, [pathname, setChatbotOpen]);
+
+  // Match the iOS rubber-band flash color to the route's dominant surface.
+  useEffect(() => {
+    const bg = pathname === "/checkout" ? "#000" : "var(--color-bg)";
+    document.body.style.backgroundColor = bg;
+    return () => {
+      document.body.style.backgroundColor = "";
+    };
   }, [pathname]);
 
   // Auth pages (login/signup)
@@ -119,7 +132,7 @@ export default function App() {
   const NAV_ITEMS = isAdminUser ? ADMIN_NAV_ITEMS : USER_NAV_ITEMS;
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row">
+    <div className="h-[100dvh] overflow-hidden flex flex-col lg:flex-row">
       {/* Desktop Sidebar - Hidden on mobile */}
       <aside className="hidden lg:flex w-64 bg-[var(--color-sidebar)] border-r border-[var(--color-border)] flex-col relative z-[70]">
         {/* Logo */}
@@ -214,17 +227,6 @@ export default function App() {
 
             {/* Profile Menu Button */}
             <div className="flex items-center gap-2">
-              {shouldUseMobileHeaderChatbot && (
-                <button
-                  type="button"
-                  onClick={() => setIsChatbotOpen((prev) => !prev)}
-                  className="w-8 h-8 rounded-full bg-[var(--color-primary)] text-white flex items-center justify-center text-sm"
-                  aria-label={isChatbotOpen ? "챗봇 닫기" : "챗봇 열기"}
-                >
-                  {isChatbotOpen ? "✕" : "🤖"}
-                </button>
-              )}
-
               <div className="relative" ref={profileMenuRef}>
                 <button
                   onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
@@ -268,10 +270,10 @@ export default function App() {
       {/* Main Content */}
       <main
         ref={mainRef}
-        className={`flex-1 overflow-auto ${isCheckoutPage ? 'pb-0 lg:pb-0' : 'pb-16 lg:pb-0'}`}
+        className={`flex-1 overflow-auto overscroll-contain ${isCheckoutPage ? 'pb-0' : 'pb-16'} lg:pb-0`}
       >
         <Routes>
-          <Route path="/" element={<HomePage />} />
+          <Route path="/" element={isAdminUser ? <AdminDashboardPage /> : <HomePage />} />
           <Route path="/checkout" element={<CheckoutPage />} />
           <Route path="/validate" element={<ValidatePage />} />
           <Route path="/mypage" element={<MyPage />} />
@@ -315,8 +317,8 @@ export default function App() {
       {shouldRenderChatbot && (
         <ChatbotWidget
           open={isChatbotOpen}
-          onOpenChange={setIsChatbotOpen}
-          hideMobileTrigger={shouldUseMobileHeaderChatbot}
+          onOpenChange={setChatbotOpen}
+          hideMobileTrigger={hideChatbotFab}
         />
       )}
     </div>

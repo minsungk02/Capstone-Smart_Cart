@@ -111,6 +111,15 @@ def create_app() -> FastAPI:
     app.include_router(checkout.router, prefix="/api")
     app.include_router(db_viewer.router)
 
+    # Serve admin-uploaded product representative images.
+    # Mounted before the SPA fallback so /static/* never falls through to index.html.
+    config.PRODUCT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/static/product_images",
+        StaticFiles(directory=str(config.PRODUCT_IMAGES_DIR)),
+        name="product_images",
+    )
+
     @app.get("/api/health")
     async def health():
         return {

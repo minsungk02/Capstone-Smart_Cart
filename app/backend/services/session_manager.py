@@ -47,6 +47,8 @@ class CheckoutSession:
         "ocr_pending_since_frame": -1,
         "ocr_pending_since_time": 0.0,  # wall-clock 기준 타임아웃용 (FPS 독립)
         "ocr_track_cache": {},          # track_id → OCR 결과
+        # Chatbot conversation history for multi-turn context
+        "chatbot_history": [],          # [{role, content}, ...] 최근 N턴
     })
 
     # OpenCV background subtractor -- per-session, not serializable

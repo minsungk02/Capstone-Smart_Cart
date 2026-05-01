@@ -38,17 +38,18 @@ declare global {
 }
 
 const MOBILE_BREAKPOINT = 1024; // Tailwind `lg` breakpoint
-const MOBILE_FAB_SIZE = 64;
+const MOBILE_FAB_SIZE = 56; // handoff spec: 56x56 round
 const DESKTOP_FAB_SIZE = 48;
 const DESKTOP_BOTTOM_OFFSET = 24;
 const MOBILE_SIDE_OFFSET = 16;
-const MOBILE_BOTTOM_OFFSET = 80; // same visual level as cart FAB (`bottom-20`)
+// Sits 88px above viewport bottom so it never collides with the 64px tab bar.
+const MOBILE_BOTTOM_OFFSET = 88;
 
 const isMobileWidth = (width: number) => width < MOBILE_BREAKPOINT;
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const getAnchoredMobilePos = () => ({
-  x: MOBILE_SIDE_OFFSET,
+  x: Math.max(0, window.innerWidth - MOBILE_SIDE_OFFSET - MOBILE_FAB_SIZE),
   y: Math.max(8, window.innerHeight - MOBILE_BOTTOM_OFFSET - MOBILE_FAB_SIZE),
 });
 
@@ -318,7 +319,7 @@ export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hide
           style={{ left: pos.x, top: pos.y }}
           className={`fixed z-30 rounded-full bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white shadow-lg flex items-center justify-center select-none ${
             isMobileView
-              ? "w-16 h-16"
+              ? "w-14 h-14"
               : "w-12 h-12 cursor-grab active:cursor-grabbing touch-none"
           }`}
           aria-label={open ? "챗봇 닫기" : "챗봇 열기"}

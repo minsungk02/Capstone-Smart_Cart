@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import toast, { Toaster } from "react-hot-toast";
 import { useSessionStore, type WsMessage } from "../stores/sessionStore";
+import { useUIStore } from "../stores/uiStore";
 import {
   wsCheckoutUrl,
   uploadVideo,
@@ -8,11 +10,11 @@ import {
   setROI,
   getHealth,
   getBilling,
+  updateBilling,
   cancelOcrPending,
 } from "../api/checkout";
 import BillingPanel from "../components/BillingPanel";
 import StatusMetrics from "../components/StatusMetrics";
-import ProductDrawer from "../components/ProductDrawer";
 
 type Mode = "camera" | "upload";
 const captureIntervalRaw = Number(import.meta.env.VITE_CAPTURE_INTERVAL_MS || 80);
@@ -50,14 +52,35 @@ const GUIDE_STEPS = [
   },
 ];
 
+type SheetState = "peek" | "half" | "full";
+const PEEK_H = 92;
+const HALF_H = 360;
+const FULL_H = 620;
+const SHEET_HEIGHT: Record<SheetState, number> = {
+  peek: PEEK_H,
+  half: HALF_H,
+  full: FULL_H,
+};
+
 export default function CheckoutPage() {
+  const navigate = useNavigate();
+  const toggleChatbot = useUIStore((s) => s.toggleChatbot);
+  const setCheckoutSheetH = useUIStore((s) => s.setCheckoutSheetH);
+
   const [mode] = useState<Mode>("camera");
   const [connected, setConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [modelReady, setModelReady] = useState(false);
+  const [sheetState, setSheetState] = useState<SheetState>("half");
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef({ startY: 0, startH: HALF_H, dragging: false, moved: false });
+  const sheetH = SHEET_HEIGHT[sheetState];
+
+  useEffect(() => {
+    setCheckoutSheetH(sheetH);
+  }, [sheetH, setCheckoutSheetH]);
   const [modelLoadMsg, setModelLoadMsg] = useState("AI 모델 로딩 중...");
   const [guideOpen, setGuideOpen] = useState(false);
   const [guideStep, setGuideStep] = useState(0);
@@ -773,6 +796,85 @@ export default function CheckoutPage() {
     [sessionId, setBilling],
   );
 
+  // --- Bottom sheet drag handlers (mobile) ---
+  const onSheetDragStart = useCallback(
+    (e: React.MouseEvent | React.TouchEvent) => {
+      const y =
+        "touches" in e
+          ? e.touches[0].clientY
+          : (e as React.MouseEvent).clientY;
+      dragRef.current = {
+        startY: y,
+        startH: sheetH,
+        dragging: true,
+        moved: false,
+      };
+    },
+    [sheetH],
+  );
+
+  const onSheetDragMove = useCallback(
+    (e: React.MouseEvent | React.TouchEvent) => {
+      const drag = dragRef.current;
+      if (!drag.dragging) return;
+      const y =
+        "touches" in e
+          ? e.touches[0].clientY
+          : (e as React.MouseEvent).clientY;
+      const dy = drag.startY - y;
+      if (Math.abs(dy) > 4) drag.moved = true;
+      const newH = Math.max(PEEK_H - 20, Math.min(FULL_H + 20, drag.startH + dy));
+      if (sheetRef.current) sheetRef.current.style.height = `${newH}px`;
+    },
+    [],
+  );
+
+  const onSheetDragEnd = useCallback(() => {
+    const drag = dragRef.current;
+    if (!drag.dragging) return;
+    drag.dragging = false;
+    if (!drag.moved) {
+      // Pure click — let onClick cycle states; clear inline height
+      if (sheetRef.current) sheetRef.current.style.height = "";
+      return;
+    }
+    const h = sheetRef.current
+      ? parseFloat(sheetRef.current.style.height)
+      : sheetH;
+    let next: SheetState;
+    if (!Number.isFinite(h)) next = sheetState;
+    else if (h < (PEEK_H + HALF_H) / 2) next = "peek";
+    else if (h < (HALF_H + FULL_H) / 2) next = "half";
+    else next = "full";
+    setSheetState(next);
+    if (sheetRef.current) sheetRef.current.style.height = "";
+  }, [sheetH, sheetState]);
+
+  const cycleSheet = () => {
+    setSheetState((s) => (s === "peek" ? "half" : s === "half" ? "full" : "peek"));
+  };
+
+  const decrementBillingItem = useCallback(
+    async (productName: string) => {
+      if (!sessionId) return;
+      const next: Record<string, number> = { ...billingItems };
+      const nextQty = Math.max(0, (next[productName] ?? 0) - 1);
+      if (nextQty === 0) {
+        delete next[productName];
+      } else {
+        next[productName] = nextQty;
+      }
+      try {
+        const state = await updateBilling(sessionId, next);
+        setBillingState(state);
+      } catch (err) {
+        console.error("[billing] decrement failed", err);
+        toast.error("수량 변경에 실패했어요");
+      }
+    },
+    [sessionId, billingItems, setBillingState],
+  );
+
   // Full-screen loading overlay while models load
   if (!modelReady) {
     return (
@@ -812,303 +914,564 @@ export default function CheckoutPage() {
     );
   }
 
+  const sortedBillingEntries = Object.entries(billingItems).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+
+  const cameraSettingsPanel = (
+    <div className="absolute top-14 right-3 md:top-16 md:right-4 z-20 w-72 bg-white/95 backdrop-blur rounded-xl border border-gray-200 shadow-xl p-3 space-y-3">
+      <div>
+        <p className="text-xs font-semibold text-gray-700 mb-1">렌즈 선택</p>
+        <select
+          value={selectedCameraId ?? ""}
+          onChange={(e) => {
+            const next = e.target.value;
+            if (next) {
+              void handleCameraDeviceChange(next);
+            }
+          }}
+          className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+          disabled={!hasMultipleCameras}
+        >
+          {cameraDevices.length === 0 && <option value="">카메라를 찾는 중...</option>}
+          {cameraDevices.map((device, idx) => (
+            <option key={device.deviceId} value={device.deviceId}>
+              {device.label || `카메라 ${idx + 1}`}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-xs font-semibold text-gray-700">디지털 줌</p>
+          <p className="text-xs text-gray-500">{zoomValue.toFixed(2)}x</p>
+        </div>
+        <input
+          type="range"
+          min={zoomMin}
+          max={zoomMax}
+          step={zoomStep}
+          value={zoomValue}
+          disabled={!canShowZoomSlider}
+          onChange={(e) => void applyZoom(Number(e.target.value))}
+          className="w-full accent-[var(--color-primary)] disabled:opacity-40"
+        />
+        <p className="text-[11px] text-gray-500 mt-1">
+          {cameraHint || "렌즈마다 지원 가능한 줌 범위가 다릅니다."}
+        </p>
+      </div>
+    </div>
+  );
+
+  const ocrPendingModal = ocrPending && (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50">
+      <div className="relative bg-white rounded-2xl p-6 mx-4 w-full max-w-sm shadow-2xl text-center space-y-4">
+        <button
+          onClick={() => void handleCancelOcrPending()}
+          className="absolute top-3 right-3 w-8 h-8 rounded-full border border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+          aria-label="OCR 인식 취소"
+          title="OCR 인식 취소"
+        >
+          ×
+        </button>
+        <div className="text-4xl">🔍</div>
+        <h3 className="font-bold text-gray-900 text-base">상품 인식이 잘 안됐어요</h3>
+        <p className="text-sm text-gray-500 leading-relaxed">
+          카메라 화면에 상품 앞면을
+          <br />
+          가까이 비춰주세요
+        </p>
+        <div className="flex items-center justify-center gap-2 text-[var(--color-primary)] text-sm font-medium">
+          <span className="w-2 h-2 rounded-full bg-[var(--color-primary)] animate-ping" />
+          OCR 인식 중...
+        </div>
+      </div>
+    </div>
+  );
+
+  const guideModal = guideOpen && (
+    <div className="absolute inset-0 z-20 flex items-end justify-center pb-8">
+      <div className="bg-white rounded-2xl p-5 mx-4 w-full max-w-sm shadow-2xl">
+        <div className="text-center space-y-3">
+          <div className="text-3xl">{GUIDE_STEPS[guideStep].icon}</div>
+          <h3 className="font-bold text-gray-900 text-sm md:text-base">
+            {GUIDE_STEPS[guideStep].title}
+          </h3>
+          <p className="text-xs md:text-sm text-gray-500 whitespace-pre-line leading-relaxed">
+            {GUIDE_STEPS[guideStep].desc}
+          </p>
+          <div className="flex justify-center gap-2 py-1">
+            {GUIDE_STEPS.map((_, i) => (
+              <div
+                key={i}
+                className={`h-2 rounded-full transition-all duration-300 ${
+                  i === guideStep
+                    ? "w-5 bg-[var(--color-primary)]"
+                    : "w-2 bg-gray-200"
+                }`}
+              />
+            ))}
+          </div>
+          <div className="flex gap-2 pt-1">
+            {guideStep > 0 && (
+              <button
+                onClick={() => setGuideStep((s) => s - 1)}
+                className="flex-1 py-2.5 border border-gray-200 text-gray-600 rounded-xl text-sm font-medium"
+              >
+                이전
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (guideStep < GUIDE_STEPS.length - 1) {
+                  setGuideStep((s) => s + 1);
+                } else {
+                  setGuideOpen(false);
+                }
+              }}
+              className="flex-1 py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white rounded-xl text-sm font-semibold transition-colors"
+            >
+              {guideStep < GUIDE_STEPS.length - 1 ? "다음" : "시작하기"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const cameraIdleCta = (
+    <div className="text-center">
+      <span className="text-5xl md:text-6xl mb-3 md:mb-4 block">
+        {isLoading ? "⏳" : "📷"}
+      </span>
+      <p className="text-gray-400 mb-3 md:mb-4 text-sm md:text-base">
+        {isLoading ? loadingMessage : "카메라를 시작하려면 버튼을 클릭하세요"}
+      </p>
+      {isLoading && (
+        <div className="mb-4">
+          <div className="inline-block w-8 h-8 border-4 border-gray-600 border-t-[var(--color-success)] rounded-full animate-spin"></div>
+        </div>
+      )}
+      <button
+        onClick={() => void startCamera()}
+        disabled={isLoading}
+        className="px-5 py-2.5 md:px-6 md:py-3 bg-[var(--color-success)] hover:bg-[var(--color-success-hover)] text-white rounded-lg md:rounded-xl text-sm md:text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg"
+      >
+        {isLoading ? "준비 중..." : "카메라 시작"}
+      </button>
+      {cameraDevices.length > 0 && (
+        <div className="mt-4 max-w-xs mx-auto text-left bg-black/30 border border-white/20 rounded-xl p-3 space-y-2">
+          <p className="text-xs text-gray-200 font-semibold">렌즈 미리 선택</p>
+          <select
+            value={selectedCameraId ?? ""}
+            onChange={(e) => {
+              const next = e.target.value;
+              if (next) {
+                void handleCameraDeviceChange(next);
+              }
+            }}
+            className="w-full border border-gray-500 bg-black/20 text-gray-100 rounded-lg px-2 py-1.5 text-sm"
+          >
+            {cameraDevices.map((device, idx) => (
+              <option
+                key={device.deviceId}
+                value={device.deviceId}
+                className="text-black"
+              >
+                {device.label || `카메라 ${idx + 1}`}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+    </div>
+  );
+
+  const uploadMode =
+    uploadProgress !== null ? (
+      <div className="text-center space-y-3">
+        <div className="w-48 md:w-64 h-2 bg-gray-700 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-[var(--color-primary)] transition-all"
+            style={{ width: `${uploadProgress}%` }}
+          />
+        </div>
+        <span className="text-gray-300 text-xs md:text-sm">
+          처리 중: {uploadProgress}%
+        </span>
+      </div>
+    ) : (
+      <label className="cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
+        <span className="text-5xl md:text-6xl mb-3 md:mb-4 block">📁</span>
+        <span className="text-xs md:text-sm">영상 업로드</span>
+        <input
+          type="file"
+          accept="video/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) handleUpload(f);
+          }}
+        />
+      </label>
+    );
+
   return (
     <>
-      {/* Toast Container */}
       <Toaster />
 
-      {/* Main Container */}
-      <div className="h-full p-0 lg:p-6 flex flex-col lg:flex-row gap-0 lg:gap-6">
-        {/* Camera Feed */}
-        <div className="flex-1 flex flex-col min-h-0">
-          <div className="bg-[#1e293b] rounded-none lg:rounded-2xl overflow-hidden relative h-[calc(100vh-64px)] lg:h-full flex items-center justify-center">
-          {/* Hidden video + canvas for capture */}
+      {/* Single shared layout — responsive via Tailwind.
+          Mobile: camera tile = viewport height minus bottom nav (64px).
+          Desktop (lg+): camera tile + 420px sidebar side by side. */}
+      <div className="h-[calc(100dvh-64px)] lg:h-full relative lg:p-6 lg:flex lg:gap-6">
+        {/* Camera tile */}
+        <div className="relative h-full w-full bg-[var(--color-camera-bg)] overflow-hidden lg:flex-1 lg:rounded-2xl lg:flex lg:items-center lg:justify-center">
+          {/* Shared video + canvases (single DOM instance) */}
           <video ref={videoRef} className="hidden" playsInline muted />
           <canvas ref={captureCanvasRef} className="hidden" />
-
-          {/* Display canvas - always in DOM, visibility controlled by CSS */}
           <canvas
             ref={displayCanvasRef}
-            className={`max-w-full max-h-full object-contain ${
+            className={`absolute inset-0 w-full h-full object-cover lg:static lg:inset-auto lg:w-auto lg:h-auto lg:max-w-full lg:max-h-full lg:object-contain ${
               mode === "camera" && connected ? "" : "hidden"
             }`}
           />
 
+          {/* Decorative grid when idle */}
+          {!(mode === "camera" && connected) && (
+            <div
+              className="absolute inset-0 opacity-60 pointer-events-none lg:hidden"
+              style={{
+                backgroundImage:
+                  "linear-gradient(rgba(148,163,184,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.05) 1px, transparent 1px)",
+                backgroundSize: "32px 32px",
+              }}
+            />
+          )}
+
           {mode === "camera" ? (
             connected ? (
               <>
-                {/* Live Badge */}
-                <div className="absolute top-3 left-3 md:top-4 md:left-4 bg-[var(--color-success)] text-white px-2 py-1 md:px-3 md:py-1 rounded-full text-xs md:text-sm font-semibold flex items-center gap-1.5 md:gap-2">
-                  <span className="w-1.5 h-1.5 md:w-2 md:h-2 bg-white rounded-full animate-pulse" />
-                  Live
+                {/* ---- DESKTOP overlays ---- */}
+                <div className="hidden lg:block">
+                  <div className="absolute top-4 left-4 bg-[var(--color-success)] text-white px-3 py-1 rounded-full text-sm font-semibold flex items-center gap-2">
+                    <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+                    Live
+                  </div>
+                  <button
+                    onClick={() => setCameraSettingsOpen((prev) => !prev)}
+                    className="absolute top-4 right-4 px-3 py-1.5 bg-black/50 hover:bg-black/65 text-white rounded-lg text-sm font-semibold transition-colors"
+                  >
+                    카메라 설정
+                  </button>
+                  <button
+                    onClick={stopCamera}
+                    className="absolute bottom-4 right-4 px-6 py-2 bg-[var(--color-danger)] hover:bg-[var(--color-danger-hover)] text-white rounded-xl text-sm font-semibold transition-colors shadow-lg"
+                  >
+                    정지
+                  </button>
                 </div>
-                <button
-                  onClick={() => setCameraSettingsOpen((prev) => !prev)}
-                  className="absolute top-3 right-3 md:top-4 md:right-4 px-3 py-1.5 bg-black/50 hover:bg-black/65 text-white rounded-lg text-xs md:text-sm font-semibold transition-colors"
-                >
-                  카메라 설정
-                </button>
-                {cameraSettingsOpen && (
-                  <div className="absolute top-14 right-3 md:top-16 md:right-4 z-20 w-72 bg-white/95 backdrop-blur rounded-xl border border-gray-200 shadow-xl p-3 space-y-3">
-                    <div>
-                      <p className="text-xs font-semibold text-gray-700 mb-1">렌즈 선택</p>
-                      <select
-                        value={selectedCameraId ?? ""}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          if (next) {
-                            void handleCameraDeviceChange(next);
-                          }
+
+                {/* ---- MOBILE overlays ---- */}
+                <div className="lg:hidden">
+                  {/* Top chrome */}
+                  <div
+                    className="absolute left-0 right-0 z-[4] flex items-center justify-between px-3"
+                    style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
+                  >
+                    <button
+                      onClick={stopCamera}
+                      className="w-10 h-10 rounded-full border-0 bg-slate-900/55 backdrop-blur text-white text-xl"
+                      aria-label="나가기"
+                    >
+                      ←
+                    </button>
+                    <div className="px-3 py-2 rounded-full bg-slate-900/60 backdrop-blur text-white text-xs font-mono flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)] shadow-[0_0_8px_var(--color-success)]" />
+                      <span>LIVE</span>
+                      {currentTrackId && (
+                        <>
+                          <span className="text-slate-400">·</span>
+                          <span>Track:{currentTrackId}</span>
+                        </>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setCameraSettingsOpen((prev) => !prev)}
+                      className="w-10 h-10 rounded-full border-0 bg-slate-900/55 backdrop-blur text-white text-base"
+                      aria-label="카메라 설정"
+                    >
+                      ⚙︎
+                    </button>
+                  </div>
+
+                  {/* Viewfinder corners — center above sheet */}
+                  <div
+                    className="absolute left-0 right-0 top-0 flex items-center justify-center pointer-events-none z-[2] transition-[bottom] duration-300 ease-[cubic-bezier(.4,0,.2,1)]"
+                    style={{ bottom: sheetH }}
+                  >
+                    <div className="relative w-60 h-60">
+                      <div
+                        className="absolute top-0 left-0 w-7 h-7 rounded-tl-xl"
+                        style={{
+                          borderTop: "3px solid var(--color-primary)",
+                          borderLeft: "3px solid var(--color-primary)",
+                          boxShadow: "0 0 16px rgba(249,115,22,0.4)",
                         }}
-                        className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
-                        disabled={!hasMultipleCameras}
-                      >
-                        {cameraDevices.length === 0 && (
-                          <option value="">카메라를 찾는 중...</option>
-                        )}
-                        {cameraDevices.map((device, idx) => (
-                          <option key={device.deviceId} value={device.deviceId}>
-                            {device.label || `카메라 ${idx + 1}`}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <p className="text-xs font-semibold text-gray-700">디지털 줌</p>
-                        <p className="text-xs text-gray-500">{zoomValue.toFixed(2)}x</p>
-                      </div>
-                      <input
-                        type="range"
-                        min={zoomMin}
-                        max={zoomMax}
-                        step={zoomStep}
-                        value={zoomValue}
-                        disabled={!canShowZoomSlider}
-                        onChange={(e) => void applyZoom(Number(e.target.value))}
-                        className="w-full accent-[var(--color-primary)] disabled:opacity-40"
                       />
-                      <p className="text-[11px] text-gray-500 mt-1">
-                        {cameraHint || "렌즈마다 지원 가능한 줌 범위가 다릅니다."}
-                      </p>
-                    </div>
-                  </div>
-                )}
-                {/* Stop Button */}
-                <button
-                  onClick={stopCamera}
-                  className="absolute bottom-3 right-3 md:bottom-4 md:right-4 px-4 py-1.5 md:px-6 md:py-2 bg-[var(--color-danger)] hover:bg-[var(--color-danger-hover)] text-white rounded-lg md:rounded-xl text-xs md:text-sm font-semibold transition-colors shadow-lg"
-                >
-                  정지
-                </button>
-
-                {/* OCR Pending Modal — 컵밥 정밀 인식 대기 */}
-                {ocrPending && (
-                  <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50">
-                    <div className="relative bg-white rounded-2xl p-6 mx-4 w-full max-w-sm shadow-2xl text-center space-y-4">
-                      <button
-                        onClick={() => void handleCancelOcrPending()}
-                        className="absolute top-3 right-3 w-8 h-8 rounded-full border border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                        aria-label="OCR 인식 취소"
-                        title="OCR 인식 취소"
+                      <div
+                        className="absolute top-0 right-0 w-7 h-7 rounded-tr-xl"
+                        style={{
+                          borderTop: "3px solid var(--color-primary)",
+                          borderRight: "3px solid var(--color-primary)",
+                          boxShadow: "0 0 16px rgba(249,115,22,0.4)",
+                        }}
+                      />
+                      <div
+                        className="absolute bottom-0 left-0 w-7 h-7 rounded-bl-xl"
+                        style={{
+                          borderBottom: "3px solid var(--color-primary)",
+                          borderLeft: "3px solid var(--color-primary)",
+                          boxShadow: "0 0 16px rgba(249,115,22,0.4)",
+                        }}
+                      />
+                      <div
+                        className="absolute bottom-0 right-0 w-7 h-7 rounded-br-xl"
+                        style={{
+                          borderBottom: "3px solid var(--color-primary)",
+                          borderRight: "3px solid var(--color-primary)",
+                          boxShadow: "0 0 16px rgba(249,115,22,0.4)",
+                        }}
+                      />
+                      <span
+                        className="absolute top-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full text-[11px] font-semibold text-white backdrop-blur-sm whitespace-nowrap"
+                        style={{ backgroundColor: "rgba(34,197,94,0.85)" }}
                       >
-                        ×
-                      </button>
-                      <div className="text-4xl">🔍</div>
-                      <h3 className="font-bold text-gray-900 text-base">
-                        상품 인식이 잘 안됐어요
-                      </h3>
-                      <p className="text-sm text-gray-500 leading-relaxed">
-                        카메라 화면에 상품 앞면을<br />
-                        가까이 비춰주세요
-                      </p>
-                      <div className="flex items-center justify-center gap-2 text-orange-500 text-sm font-medium">
-                        <span className="w-2 h-2 rounded-full bg-orange-500 animate-ping" />
-                        OCR 인식 중...
-                      </div>
+                        ↓ 담기
+                      </span>
+                      <span
+                        className="absolute bottom-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full text-[11px] font-semibold text-white backdrop-blur-sm whitespace-nowrap"
+                        style={{ backgroundColor: "rgba(239,68,68,0.85)" }}
+                      >
+                        ↑ 빼기
+                      </span>
                     </div>
                   </div>
-                )}
 
-                {/* 3-Step Guide Modal */}
-                {guideOpen && (
-                  <div className="absolute inset-0 z-20 flex items-end justify-center pb-16 md:pb-8">
-                    <div className="bg-white rounded-2xl p-5 mx-4 w-full max-w-sm shadow-2xl">
-                      <div className="text-center space-y-3">
-                        <div className="text-3xl">{GUIDE_STEPS[guideStep].icon}</div>
-                        <h3 className="font-bold text-gray-900 text-sm md:text-base">
-                          {GUIDE_STEPS[guideStep].title}
-                        </h3>
-                        <p className="text-xs md:text-sm text-gray-500 whitespace-pre-line leading-relaxed">
-                          {GUIDE_STEPS[guideStep].desc}
-                        </p>
-                        {/* Step dots */}
-                        <div className="flex justify-center gap-2 py-1">
-                          {GUIDE_STEPS.map((_, i) => (
-                            <div
-                              key={i}
-                              className={`h-2 rounded-full transition-all duration-300 ${
-                                i === guideStep ? "w-5 bg-orange-500" : "w-2 bg-gray-200"
-                              }`}
-                            />
-                          ))}
-                        </div>
-                        <div className="flex gap-2 pt-1">
-                          {guideStep > 0 && (
-                            <button
-                              onClick={() => setGuideStep(s => s - 1)}
-                              className="flex-1 py-2.5 border border-gray-200 text-gray-600 rounded-xl text-sm font-medium"
-                            >
-                              이전
-                            </button>
+                  {/* Status bar above sheet */}
+                  <div
+                    className="absolute left-3 right-3 z-[3] px-3 py-2 rounded-[10px] bg-slate-900/65 backdrop-blur flex items-center gap-2 text-[11px] font-mono transition-[bottom] duration-300 ease-[cubic-bezier(.4,0,.2,1)]"
+                    style={{ bottom: sheetH + 12 }}
+                  >
+                    <span className="text-[var(--color-success)]">● OCR_READY</span>
+                    <span className="text-slate-500">|</span>
+                    <span className="text-slate-400 flex-1 truncate">
+                      {lastStatus || "상품을 카메라에 보여주세요"}
+                    </span>
+                  </div>
+
+                  {/* Chatbot FAB — above sheet, never overlaps checkout */}
+                  <button
+                    onClick={toggleChatbot}
+                    className="absolute right-4 z-[25] w-[52px] h-[52px] rounded-full border-2 border-white/15 text-white text-[22px] flex items-center justify-center transition-[bottom] duration-300 ease-[cubic-bezier(.4,0,.2,1)]"
+                    style={{
+                      bottom: sheetH + 68,
+                      background: "linear-gradient(135deg, #fb923c, #f97316)",
+                      boxShadow:
+                        "0 10px 24px rgba(249,115,22,0.45), 0 0 0 4px rgba(249,115,22,0.12)",
+                    }}
+                    aria-label="챗봇"
+                  >
+                    🤖
+                  </button>
+
+                  {/* Bottom sheet */}
+                  <div
+                    ref={sheetRef}
+                    className="absolute left-0 right-0 bottom-0 bg-white flex flex-col z-[10]"
+                    style={{
+                      height: sheetH,
+                      borderRadius: "22px 22px 0 0",
+                      boxShadow: "0 -12px 40px rgba(0,0,0,0.28)",
+                      transition: dragRef.current.dragging
+                        ? "none"
+                        : "height 300ms cubic-bezier(.4,0,.2,1)",
+                    }}
+                  >
+                    <div
+                      onMouseDown={onSheetDragStart}
+                      onMouseMove={onSheetDragMove}
+                      onMouseUp={onSheetDragEnd}
+                      onMouseLeave={onSheetDragEnd}
+                      onTouchStart={onSheetDragStart}
+                      onTouchMove={onSheetDragMove}
+                      onTouchEnd={onSheetDragEnd}
+                      onClick={cycleSheet}
+                      style={{ touchAction: "none" }}
+                      className="pt-2 pb-1 flex flex-col items-center cursor-grab select-none"
+                    >
+                      <div className="w-10 h-1 bg-slate-300 rounded-full" />
+                    </div>
+
+                    <div className="px-5 pb-2.5 flex items-center justify-between">
+                      <div>
+                        <div className="text-[17px] font-bold text-slate-900 flex items-center gap-2">
+                          장바구니
+                          {totalCount > 0 && (
+                            <span className="text-[11px] font-bold bg-[var(--color-primary)] text-white px-2 py-0.5 rounded-full">
+                              {totalCount}
+                            </span>
                           )}
-                          <button
-                            onClick={() => {
-                              if (guideStep < GUIDE_STEPS.length - 1) {
-                                setGuideStep(s => s + 1);
-                              } else {
-                                setGuideOpen(false);
-                              }
-                            }}
-                            className="flex-1 py-2.5 bg-orange-500 hover:bg-orange-600 text-white rounded-xl text-sm font-semibold transition-colors"
-                          >
-                            {guideStep < GUIDE_STEPS.length - 1 ? "다음" : "시작하기"}
-                          </button>
+                        </div>
+                        <div className="text-[11.5px] text-slate-500 mt-0.5">
+                          {sortedBillingEntries.length}종 · 총 {totalCount}개
                         </div>
                       </div>
+                      <div className="text-[20px] font-extrabold text-slate-900 tracking-tight">
+                        ₩{totalAmount.toLocaleString()}
+                      </div>
+                    </div>
+
+                    {sheetState !== "peek" && (
+                      <div className="flex-1 overflow-y-auto overscroll-contain px-5 pb-2">
+                        {sortedBillingEntries.length === 0 ? (
+                          <div className="py-7 text-center text-slate-400 text-sm">
+                            🛒 아직 담긴 상품이 없어요
+                            <br />
+                            <span className="text-xs">
+                              카메라 앞에 상품을 보여주세요
+                            </span>
+                          </div>
+                        ) : (
+                          sortedBillingEntries.map(([name, qty], idx) => {
+                            const unitPrice = itemUnitPrices[name];
+                            const lineTotal = itemLineTotals[name];
+                            const hasPrice = unitPrice != null;
+                            return (
+                              <div
+                                key={name}
+                                className={`flex items-center gap-3 py-2.5 ${
+                                  idx < sortedBillingEntries.length - 1
+                                    ? "border-b border-slate-100"
+                                    : ""
+                                }`}
+                              >
+                                <div className="w-11 h-11 rounded-[10px] bg-[var(--color-primary-light)] flex items-center justify-center text-[var(--color-primary)] font-bold text-sm flex-shrink-0">
+                                  {name[0]}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-sm font-semibold text-slate-900 truncate">
+                                    {name}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 mt-0.5">
+                                    {hasPrice
+                                      ? `₩${unitPrice.toLocaleString()} × ${qty}`
+                                      : `수량 ${qty} · 가격 정보 없음`}
+                                    {itemScores[name] !== undefined && (
+                                      <span className="text-slate-400">
+                                        {" "}
+                                        · {itemScores[name].toFixed(2)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="text-sm font-bold text-slate-900 min-w-16 text-right">
+                                  {hasPrice && lineTotal != null
+                                    ? `₩${lineTotal.toLocaleString()}`
+                                    : "—"}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => void decrementBillingItem(name)}
+                                  aria-label={`${name} 하나 빼기`}
+                                  className="w-7 h-7 rounded-full border border-slate-200 text-slate-500 flex items-center justify-center text-base leading-none hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] active:bg-[var(--color-danger)]/10 transition-colors flex-shrink-0"
+                                >
+                                  −
+                                </button>
+                              </div>
+                            );
+                          })
+                        )}
+                        {unpricedItems.length > 0 && (
+                          <div className="mt-2 p-2 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-700">
+                            가격 미등록: {unpricedItems.join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div
+                      className={`px-4 pb-4 pt-2 bg-white ${
+                        sheetState !== "peek" ? "border-t border-slate-100" : ""
+                      }`}
+                    >
+                      <button
+                        disabled={totalCount === 0}
+                        onClick={() => navigate("/validate")}
+                        className="w-full py-3.5 rounded-[14px] text-[15px] font-bold text-white flex items-center justify-center gap-2.5 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed"
+                        style={
+                          totalCount > 0
+                            ? {
+                                background:
+                                  "linear-gradient(180deg, #fb923c, #f97316)",
+                                boxShadow:
+                                  "0 6px 20px rgba(249,115,22,0.38)",
+                              }
+                            : undefined
+                        }
+                      >
+                        <span aria-hidden="true" className="text-[17px] leading-none">🛒</span>
+                        <span>결제하기</span>
+                        {totalCount > 0 && (
+                          <span className="bg-black/15 px-2.5 py-0.5 rounded-full text-[13px]">
+                            ₩{totalAmount.toLocaleString()}
+                          </span>
+                        )}
+                      </button>
                     </div>
                   </div>
-                )}
+                </div>
+
+                {/* ---- Shared overlays (both viewports) ---- */}
+                {cameraSettingsOpen && cameraSettingsPanel}
+                {ocrPendingModal}
+                {guideModal}
               </>
             ) : (
-              <div className="text-center">
-                <span className="text-5xl md:text-6xl mb-3 md:mb-4 block">
-                  {isLoading ? "⏳" : "📷"}
-                </span>
-                <p className="text-gray-400 mb-3 md:mb-4 text-sm md:text-base">
-                  {isLoading ? loadingMessage : "카메라를 시작하려면 버튼을 클릭하세요"}
-                </p>
-                {isLoading && (
-                  <div className="mb-4">
-                    <div className="inline-block w-8 h-8 border-4 border-gray-600 border-t-[var(--color-success)] rounded-full animate-spin"></div>
-                  </div>
-                )}
-                <button
-                  onClick={() => void startCamera()}
-                  disabled={isLoading}
-                  className="px-5 py-2.5 md:px-6 md:py-3 bg-[var(--color-success)] hover:bg-[var(--color-success-hover)] text-white rounded-lg md:rounded-xl text-sm md:text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg"
-                >
-                  {isLoading ? "준비 중..." : "카메라 시작"}
-                </button>
-                {cameraDevices.length > 0 && (
-                  <div className="mt-4 max-w-xs mx-auto text-left bg-black/30 border border-white/20 rounded-xl p-3 space-y-2">
-                    <p className="text-xs text-gray-200 font-semibold">렌즈 미리 선택</p>
-                    <select
-                      value={selectedCameraId ?? ""}
-                      onChange={(e) => {
-                        const next = e.target.value;
-                        if (next) {
-                          void handleCameraDeviceChange(next);
-                        }
-                      }}
-                      className="w-full border border-gray-500 bg-black/20 text-gray-100 rounded-lg px-2 py-1.5 text-sm"
-                    >
-                      {cameraDevices.map((device, idx) => (
-                        <option key={device.deviceId} value={device.deviceId} className="text-black">
-                          {device.label || `카메라 ${idx + 1}`}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+              <div className="absolute inset-0 flex items-center justify-center px-6 bg-[var(--color-camera-bg)]">
+                {cameraIdleCta}
               </div>
             )
-          ) : uploadProgress !== null ? (
-            <div className="text-center space-y-3">
-              <div className="w-48 md:w-64 h-2 bg-gray-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-[var(--color-primary)] transition-all"
-                  style={{ width: `${uploadProgress}%` }}
-                />
-              </div>
-              <span className="text-gray-300 text-xs md:text-sm">
-                처리 중: {uploadProgress}%
-              </span>
-            </div>
           ) : (
-            <label className="cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
-              <span className="text-5xl md:text-6xl mb-3 md:mb-4 block">📁</span>
-              <span className="text-xs md:text-sm">영상 업로드</span>
-              <input
-                type="file"
-                accept="video/*"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleUpload(f);
-                }}
-              />
-            </label>
+            <div className="absolute inset-0 flex items-center justify-center px-6 bg-[var(--color-camera-bg)]">
+              {uploadMode}
+            </div>
           )}
         </div>
-      </div>
 
-      {/* Status + Product List - Desktop Only */}
-      <div className="hidden lg:flex w-full lg:w-[420px] flex-col gap-3 md:gap-4">
-        {/* Status Metrics */}
-        <StatusMetrics
-          lastLabel={lastLabel}
-          lastScore={lastScore}
-          lastStatus={lastStatus}
-          fps={undefined}
-          trackId={currentTrackId}
-        />
-
-        {/* Product List */}
-        <div className="flex-1 min-h-0">
-          <BillingPanel
-            billingItems={billingItems}
-            itemScores={itemScores}
-            itemUnitPrices={itemUnitPrices}
-            itemLineTotals={itemLineTotals}
-            totalCount={totalCount}
-            totalAmount={totalAmount}
-            currency={currency}
-            unpricedItems={unpricedItems}
+        {/* Desktop sidebar */}
+        <div className="hidden lg:flex w-[420px] flex-col gap-4">
+          <StatusMetrics
+            lastLabel={lastLabel}
+            lastScore={lastScore}
+            lastStatus={lastStatus}
+            fps={undefined}
+            trackId={currentTrackId}
           />
+          <div className="flex-1 min-h-0">
+            <BillingPanel
+              billingItems={billingItems}
+              itemScores={itemScores}
+              itemUnitPrices={itemUnitPrices}
+              itemLineTotals={itemLineTotals}
+              totalCount={totalCount}
+              totalAmount={totalAmount}
+              currency={currency}
+              unpricedItems={unpricedItems}
+            />
+          </div>
         </div>
       </div>
-    </div>
-
-    {/* FAB (Floating Action Button) - Mobile Only */}
-    <button
-      onClick={() => setDrawerOpen(true)}
-      className="lg:hidden fixed bottom-20 right-4 w-16 h-16 bg-[var(--color-primary)] text-white rounded-full shadow-lg flex items-center justify-center z-30 active:scale-95 transition-transform"
-    >
-      <div className="relative">
-        <span className="text-2xl">🛒</span>
-        {totalCount > 0 && (
-          <span className="absolute -top-2 -right-2 w-6 h-6 bg-[var(--color-danger)] text-white text-xs font-bold rounded-full flex items-center justify-center">
-            {totalCount}
-          </span>
-        )}
-      </div>
-    </button>
-
-    {/* Product Drawer - Mobile Only */}
-      <ProductDrawer
-        isOpen={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        billingItems={billingItems}
-        itemScores={itemScores}
-        itemUnitPrices={itemUnitPrices}
-        itemLineTotals={itemLineTotals}
-        totalCount={totalCount}
-        totalAmount={totalAmount}
-        currency={currency}
-        unpricedItems={unpricedItems}
-      />
-  </>
+    </>
   );
 }

@@ -13,6 +13,89 @@ const PAYMENT_METHOD_OPTIONS: Array<{ value: PaymentMethod; label: string; desc:
   { value: "account", label: "계좌 이체", desc: "실시간 계좌이체" },
 ];
 
+type ReceiptLine = { name: string; qty: number; lineTotal: number };
+type ReceiptData = {
+  items: ReceiptLine[];
+  total: number;
+  when: string;
+  receiptId: string;
+};
+
+function ReceiptView({ data, onDone }: { data: ReceiptData; onDone: () => void }) {
+  const tax = Math.round(data.total * 0.1);
+  const subtotal = data.total - tax;
+  return (
+    <div className="fixed inset-0 z-[60] overflow-y-auto overscroll-contain bg-[var(--color-bg)] px-4 py-6">
+      <div className="max-w-md mx-auto">
+        <div className="bg-white rounded-[18px] border border-[var(--color-border)] overflow-hidden shadow-[var(--shadow-lg)]">
+          <div
+            className="px-5 pt-5 pb-4 text-center"
+            style={{ background: "linear-gradient(135deg,#fff7ed,#ffedd5)" }}
+          >
+            <div className="w-[52px] h-[52px] rounded-[14px] bg-white mx-auto mb-2 flex items-center justify-center shadow-[0_4px_10px_rgba(249,115,22,0.15)]">
+              <img src="/jangbogo.svg" alt="" className="w-9 h-9 rounded-lg" />
+            </div>
+            <div className="font-serif text-[20px] font-semibold text-slate-900 tracking-tight">
+              영수증
+            </div>
+            <div className="text-[12px] text-amber-900/80 mt-0.5">{data.when}</div>
+          </div>
+
+          <div className="px-5 py-3.5">
+            {data.items.map((i) => (
+              <div
+                key={i.name}
+                className="flex justify-between py-2 text-sm"
+              >
+                <div className="text-slate-900">
+                  {i.name} <span className="text-slate-400">× {i.qty}</span>
+                </div>
+                <div className="text-slate-900 font-semibold">
+                  ₩{i.lineTotal.toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mx-5 border-t-[1.5px] border-dashed border-slate-300" />
+
+          <div className="px-5 py-3.5 space-y-1">
+            <div className="flex justify-between text-[13px] text-slate-500">
+              <span>소계</span>
+              <span>₩{subtotal.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between text-[13px] text-slate-500 mb-2">
+              <span>부가세 (10%)</span>
+              <span>₩{tax.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between text-lg font-bold text-slate-900">
+              <span>합계</span>
+              <span className="text-[var(--color-primary)]">
+                ₩{data.total.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          <div className="mx-5 border-t-[1.5px] border-dashed border-slate-300" />
+
+          <div className="px-5 py-4 text-center text-[12px] text-slate-400 leading-relaxed">
+            영수증 #{data.receiptId}
+            <br />
+            장보GO에서 담아주셔서 감사합니다 🙌
+          </div>
+        </div>
+
+        <button
+          onClick={onDone}
+          className="w-full mt-4 py-3.5 rounded-[14px] bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white text-[16px] font-bold transition-colors shadow-[0_6px_20px_rgba(249,115,22,0.25)]"
+        >
+          장보기 완료
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function ValidatePage() {
   const navigate = useNavigate();
   const [isConfirming, setIsConfirming] = useState(false);
@@ -23,6 +106,7 @@ export default function ValidatePage() {
   const [payerName, setPayerName] = useState("");
   const [payerPhone, setPayerPhone] = useState("");
   const [isPaymentAgreed, setIsPaymentAgreed] = useState(false);
+  const [receipt, setReceipt] = useState<ReceiptData | null>(null);
   const { token } = useAuthStore();
   const {
     sessionId,
@@ -111,19 +195,32 @@ export default function ValidatePage() {
       });
       purchaseSaved = true;
 
+      // Snapshot receipt data before session reset clears it.
+      const receiptItems: ReceiptLine[] = Object.entries(billingItems)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, qty]) => ({
+          name,
+          qty,
+          lineTotal: itemLineTotals[name] ?? (itemUnitPrices[name] ?? 0) * qty,
+        }));
+
       // Confirm billing
       const confirmed = await confirmBilling(sessionId);
       const finalAmount =
         confirmed.confirmed_total_amount ?? created.total_amount;
-      const warning =
-        confirmed.unpriced_items.length > 0
-          ? `\n(가격 미확인 품목 ${confirmed.unpriced_items.length}개 포함)`
-          : "";
 
-      // Reset and navigate
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const when = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const receiptId = `R-${1024 + Math.floor(Math.random() * 900)}`;
+
       resetSession();
-      alert(`구매가 완료되었습니다! 결제 금액: ${formatAmount(finalAmount)}${warning}`);
-      navigate("/mypage");
+      setReceipt({
+        items: receiptItems,
+        total: finalAmount,
+        when,
+        receiptId,
+      });
     } catch (error) {
       console.error("Purchase confirmation failed:", error);
       if (purchaseSaved) {
@@ -135,7 +232,16 @@ export default function ValidatePage() {
     } finally {
       setIsConfirming(false);
     }
-  }, [sessionId, token, billingItems, resetSession, navigate, isConfirming]);
+  }, [
+    sessionId,
+    token,
+    billingItems,
+    itemLineTotals,
+    itemUnitPrices,
+    resetSession,
+    navigate,
+    isConfirming,
+  ]);
 
   const openPaymentModal = useCallback(() => {
     if (entries.length === 0 || isConfirming) return;
@@ -203,6 +309,10 @@ export default function ValidatePage() {
     handleConfirm,
   ]);
 
+  if (receipt) {
+    return <ReceiptView data={receipt} onDone={() => navigate("/")} />;
+  }
+
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)]">
       {/* Main Content */}
@@ -227,7 +337,7 @@ export default function ValidatePage() {
                 </svg>
               </div>
               <div>
-                <h2 className="text-xl md:text-2xl font-bold text-[var(--color-text)] mb-1 md:mb-2">
+                <h2 className="font-serif text-2xl md:text-3xl font-semibold text-[var(--color-text)] mb-1 md:mb-2 tracking-tight">
                   영수증 확인
                 </h2>
                 <p className="text-sm md:text-base text-[var(--color-text-secondary)]">

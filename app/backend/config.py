@@ -40,6 +40,10 @@ LABELS_PATH = str(DATA_DIR / "labels.npy")
 FAISS_INDEX_PATH = str(DATA_DIR / "faiss_index.bin")
 ADAPTER_DIR = str(DATA_DIR)
 
+# Product representative images (saved on POST /products, served via /static/product_images/<item_no>.jpg)
+PRODUCT_IMAGES_DIR = Path(os.getenv("PRODUCT_IMAGES_DIR", str(DATA_DIR / "product_images")))
+PRODUCT_IMAGES_URL_PREFIX = "/static/product_images"
+
 # Server
 CORS_ORIGINS: list[str] = os.getenv(
     "CORS_ORIGINS", "http://localhost:5173,http://localhost:3000"

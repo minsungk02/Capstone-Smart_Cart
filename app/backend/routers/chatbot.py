@@ -23,6 +23,45 @@ from backend.database import get_db
 from backend.dependencies import app_state
 
 router = APIRouter(tags=["chatbot"])
+
+# ---------------------------------------------------------------------------
+# LLM / Tool Use configuration
+# ---------------------------------------------------------------------------
+
+_MAX_CHAT_HISTORY_TURNS = 5   # 최근 5턴 (user+assistant 쌍) 유지
+_MAX_TOOL_ROUNDS = 3          # tool 호출 최대 라운드
+
+SYSTEM_PROMPT = """\
+당신은 '장보고' 마트의 AI 쇼핑 도우미입니다.
+
+## 역할
+- 고객의 장바구니 관리, 상품 검색, 가격·할인·영양정보 안내, 매장 코너 위치 안내를 담당합니다.
+- 항상 친절하고 자연스러운 한국어로 답변하세요.
+
+## 답변 규칙
+1. **DB에 있는 정보만** 근거로 답변하세요. 추측하거나 지어내지 마세요.
+2. DB에서 확인되지 않는 내용은 "현재 DB에 해당 정보가 없습니다"라고 명확히 알려주세요.
+3. 가격 미등록 상품은 "가격 정보가 아직 등록되지 않았습니다"라고 안내하세요.
+4. 금액에는 항상 쉼표와 '원' 단위를 붙여주세요 (예: 1,500원).
+5. 답변은 간결하되 필요한 정보는 빠짐없이 포함하세요.
+6. 여러 상품을 비교할 때는 번호 목록을 사용하세요.
+7. 이전 대화 맥락을 참고하되, 새 질문의 의도가 명확하면 그에 집중하세요.
+
+## 도구(tool) 사용
+- 상품 검색, 상세 조회, 매장 위치 조회 도구가 제공됩니다.
+- 질문에 답하기 위해 필요한 도구를 적극적으로 호출하세요.
+- 도구 결과를 바탕으로 자연스럽게 종합 답변을 작성하세요.
+"""
+
+# 소형 로컬 모델(4B 등)용 간결한 시스템 프롬프트
+SYSTEM_PROMPT_LOCAL = """\
+당신은 '장보고' 마트의 쇼핑 도우미입니다.
+제공된 DB 정보만 근거로 친절하게 한국어로 답변하세요.
+DB에 없는 정보는 "해당 정보가 없습니다"라고 답하세요.
+금액은 쉼표와 원 단위를 사용하세요 (예: 1,500원).
+상품명에 포함된 브랜드, 중량 정보도 함께 안내하세요.
+"""
+
 # ---------------------------------------------------------------------------
 # Cart action helpers
 # ---------------------------------------------------------------------------
@@ -574,6 +613,29 @@ def _table_columns(db: Session, table_name: str) -> list[str]:
     return valid
 
 
+def _strip_korean_particles(token: str) -> str:
+    """한국어 조사/어미를 제거하여 핵심 명사만 추출.
+
+    예: '스팸이랑' → '스팸', '동원리챔이랑' → '동원리챔',
+        '새우깡은' → '새우깡', '콜라를' → '콜라'
+    """
+    # 긴 조사부터 매칭해야 "에서" 같은 2글자 조사가 먼저 걸림
+    _PARTICLES = (
+        "이랑", "에서", "하고", "으로", "부터", "까지", "에게", "한테",
+        "처럼", "만큼", "대로", "보다", "같은", "말고", "에서는",
+        "으로는", "이라", "이야", "이에요", "에는", "에도", "과는",
+        "와는", "이랑은",
+        "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과",
+        "도", "만", "요", "야",
+    )
+    for p in _PARTICLES:
+        if token.endswith(p) and len(token) > len(p):
+            stripped = token[: -len(p)]
+            if len(stripped) >= 2:
+                return stripped
+    return token
+
+
 def _extract_catalog_terms(question: str, limit: int = 4) -> list[str]:
     tokens = re.findall(r"[0-9]{3,}|[A-Za-z]{2,}|[가-힣]{2,}", question or "")
     terms: list[str] = []
@@ -582,6 +644,8 @@ def _extract_catalog_terms(question: str, limit: int = 4) -> list[str]:
         token = raw.strip()
         if not token:
             continue
+        # 한국어 조사 제거: "스팸이랑" → "스팸", "동원리챔이랑" → "동원리챔"
+        token = _strip_korean_particles(token)
         normalized = token.lower()
         if normalized in _CATALOG_STOPWORDS:
             continue
@@ -589,9 +653,28 @@ def _extract_catalog_terms(question: str, limit: int = 4) -> list[str]:
             continue
         seen.add(normalized)
         terms.append(token)
-        if len(terms) >= limit:
-            break
-    return terms
+
+    # 긴 한글 토큰에서 핵심 서브스트링 추출 (브랜드/중량 제거)
+    # 예: "매운새우깡90G" → "매운새우깡", "새우깡"
+    extra: list[str] = []
+    for term in list(terms):
+        if len(term) < 4 or not re.search(r"[가-힣]", term):
+            continue
+        # 뒤쪽 용량 패턴 제거 (90G, 300ml 등)
+        core = re.sub(r"\d+[gGmMlLkK]+[gGlL]?$", "", term).strip()
+        if core and core != term and len(core) >= 2 and core.lower() not in seen:
+            extra.append(core)
+            seen.add(core.lower())
+        # 앞쪽 브랜드 접두사 제거 시도 (2~3자 한글 브랜드 + 나머지 3자 이상)
+        brand_match = re.match(r"^([가-힣]{2,3})([가-힣]{3,})", core or term)
+        if brand_match:
+            suffix = brand_match.group(2)
+            if suffix.lower() not in seen and suffix.lower() not in _CATALOG_STOPWORDS:
+                extra.append(suffix)
+                seen.add(suffix.lower())
+
+    terms.extend(extra)
+    return terms[:limit]
 
 
 def _query_catalog_products(
@@ -1746,23 +1829,547 @@ def _answer_nutrition_direct(question: str, catalog_context: dict[str, Any] | No
     return f"{fallback_product}의 {', '.join(requested_nutrients)} 정보는 현재 DB에서 확인되지 않습니다."
 
 
-def _answer_question(
-    question: str,
-    products: list[ProductMeta],
-    total: dict[str, Any],
-    catalog_context: dict[str, Any] | None = None,
-) -> str:
-    q = question.strip()
-    if not q:
-        return "질문을 입력해 주세요. 예: '총 금액 얼마야?'"
-    direct_location = _answer_corner_location_direct(q, catalog_context)
-    if direct_location:
-        return direct_location
-    direct_nutrition = _answer_nutrition_direct(q, catalog_context)
-    if direct_nutrition:
-        return direct_nutrition
+# ---------------------------------------------------------------------------
+# Tool Use: tool definitions + execution helpers
+# ---------------------------------------------------------------------------
 
-    # Build context for LLM
+CHATBOT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_products",
+            "description": "상품을 키워드, 카테고리, 가격 범위로 검색합니다. 최대 8개 결과를 반환합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "상품명 검색어 (예: 새우깡, 콜라)"},
+                    "category": {"type": "string", "description": "카테고리 (예: 과자, 면류, 음료)"},
+                    "max_price": {"type": "integer", "description": "최대 가격 (원)"},
+                    "only_discounted": {"type": "boolean", "description": "할인 상품만 검색", "default": False},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_detail",
+            "description": "특정 상품의 가격, 할인, 영양정보 상세를 조회합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_no": {"type": "string", "description": "상품번호"},
+                    "product_name": {"type": "string", "description": "상품명 (상품번호 모를 때)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_corner_location",
+            "description": "상품 또는 카테고리의 매장 내 코너 위치를 조회합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "상품명 또는 카테고리명"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_discount_ranking",
+            "description": "카테고리별 할인율 높은 상품 순위를 조회합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "카테고리 (예: 과자, 면류). 생략하면 전체."},
+                    "limit": {"type": "integer", "description": "반환할 상품 수", "default": 5},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_nutrition_info",
+            "description": "특정 상품의 영양정보(칼로리, 나트륨, 단백질 등)를 조회합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "상품명 또는 검색어"},
+                    "nutrient": {"type": "string", "description": "특정 영양소 (칼로리, 나트륨, 단백질, 지방 등)"},
+                    "rank_order": {"type": "string", "enum": ["highest", "lowest"], "description": "높은순/낮은순 정렬"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+]
+
+
+def _tool_search_products(
+    db: Session,
+    keyword: str = "",
+    category: str = "",
+    max_price: int | None = None,
+    only_discounted: bool = False,
+) -> str:
+    """search_products tool: DB에서 상품 검색 후 JSON 반환."""
+    product_columns = _table_columns(db, "products")
+    price_columns = _table_columns(db, "product_prices")
+    if not product_columns:
+        return json.dumps({"results": [], "message": "상품 테이블을 찾을 수 없습니다."}, ensure_ascii=False)
+
+    # Build search query from keyword + category
+    search_query = " ".join(filter(None, [keyword, category]))
+    if not search_query.strip():
+        search_query = "상품"
+
+    product_rows, terms = _query_catalog_products(db, search_query, product_columns, _MAX_CATALOG_MATCH_ROWS)
+
+    results: list[dict[str, Any]] = []
+    seen_item_nos: set[str] = set()
+    for row in product_rows:
+        item_no = str(row.get("item_no") or "").strip()
+        if item_no and item_no in seen_item_nos:
+            continue
+        if item_no:
+            seen_item_nos.add(item_no)
+
+        product_name = str(row.get("product_name") or "").strip()
+        cat_l = str(row.get("category_l") or "").strip()
+
+        # category filter
+        if category and cat_l and category not in cat_l:
+            cat_m = str(row.get("category_m") or "").strip()
+            cat_s = str(row.get("category_s") or "").strip()
+            if category not in cat_m and category not in cat_s and category not in product_name:
+                continue
+
+        # price lookup
+        price_info: dict[str, Any] = {}
+        product_id = row.get("id")
+        if product_id is not None and price_columns:
+            try:
+                price_row = _latest_price_row(db, int(product_id), price_columns)
+            except SQLAlchemyError:
+                price_row = {}
+            if price_row:
+                price_info["price"] = price_row.get("price")
+                price_info["currency"] = price_row.get("currency", "원")
+                for disc_col in ("is_discounted", "discount_rate", "discount_amount"):
+                    val = price_row.get(disc_col)
+                    if val is not None:
+                        price_info[disc_col] = val
+
+        # max_price filter
+        if max_price is not None and price_info.get("price") is not None:
+            try:
+                if int(price_info["price"]) > max_price:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        # only_discounted filter
+        if only_discounted and not price_info.get("is_discounted"):
+            continue
+
+        entry = {"item_no": item_no, "product_name": product_name}
+        if cat_l:
+            entry["category"] = cat_l
+        entry.update(price_info)
+        results.append(entry)
+
+        if len(results) >= 8:
+            break
+
+    return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False, default=str)
+
+
+def _tool_get_product_detail(
+    db: Session,
+    item_no: str = "",
+    product_name: str = "",
+) -> str:
+    """get_product_detail tool: 상품 상세 (가격, 할인, 영양정보) 조회."""
+    product_columns = _table_columns(db, "products")
+    price_columns = _table_columns(db, "product_prices")
+    if not product_columns:
+        return json.dumps({"error": "상품 테이블 없음"}, ensure_ascii=False)
+
+    # Find the product
+    row = None
+    if item_no:
+        try:
+            row = db.execute(
+                text("SELECT * FROM products WHERE item_no = :v LIMIT 1"),
+                {"v": item_no},
+            ).mappings().first()
+        except SQLAlchemyError:
+            pass
+    if not row and product_name:
+        try:
+            row = db.execute(
+                text("SELECT * FROM products WHERE product_name LIKE :v ORDER BY LENGTH(product_name) ASC LIMIT 1"),
+                {"v": f"%{product_name}%"},
+            ).mappings().first()
+        except SQLAlchemyError:
+            pass
+
+    if not row:
+        return json.dumps({"error": "해당 상품을 찾을 수 없습니다."}, ensure_ascii=False)
+
+    row_dict = dict(row)
+    result: dict[str, Any] = {
+        "item_no": str(row_dict.get("item_no") or ""),
+        "product_name": str(row_dict.get("product_name") or ""),
+    }
+    for col in ("category_l", "category_m", "category_s", "barcd", "company"):
+        val = row_dict.get(col)
+        if val and str(val).strip():
+            result[col] = str(val).strip()
+
+    # Price + discount
+    product_id = row_dict.get("id")
+    if product_id is not None and price_columns:
+        try:
+            price_row = _latest_price_row(db, int(product_id), price_columns)
+        except SQLAlchemyError:
+            price_row = {}
+        if price_row:
+            result["price"] = price_row.get("price")
+            result["currency"] = price_row.get("currency", "원")
+            for disc_col in ("is_discounted", "discount_rate", "discount_amount"):
+                val = price_row.get(disc_col)
+                if val is not None:
+                    result[disc_col] = val
+
+    # Nutrition
+    nutrition_columns = [
+        col for col in product_columns
+        if any(key in col.lower() for key in ("nutrition", "nutri", "kcal", "calorie", "protein", "carb", "fat", "sodium", "sugar"))
+    ]
+    for col in nutrition_columns:
+        raw = row_dict.get(col)
+        if raw is not None:
+            parsed = _maybe_json(raw)
+            if parsed is not None:
+                result[col] = parsed
+
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+def _tool_get_corner_location(db: Session, query: str = "") -> str:
+    """get_corner_location tool: 카테고리-코너 매핑 조회."""
+    corner_map = _category_corner_snapshot(db)
+    if not corner_map:
+        return json.dumps({"error": "코너 매핑 정보가 등록되지 않았습니다."}, ensure_ascii=False)
+
+    query_norm = query.strip().lower()
+
+    # Direct category match
+    for cat, info in corner_map.items():
+        if query_norm in cat.lower() or cat.lower() in query_norm:
+            return json.dumps({
+                "category": cat,
+                "corner_no": info["corner_no"],
+                "corner_name": info.get("corner_name", f"{info['corner_no']}번 코너"),
+            }, ensure_ascii=False)
+
+    # Product name → category lookup
+    product_columns = _table_columns(db, "products")
+    if product_columns and "category_l" in product_columns:
+        try:
+            row = db.execute(
+                text("SELECT category_l FROM products WHERE product_name LIKE :kw LIMIT 1"),
+                {"kw": f"%{query}%"},
+            ).mappings().first()
+        except SQLAlchemyError:
+            row = None
+        if row:
+            cat_l = str(row.get("category_l") or "").strip()
+            if cat_l and cat_l in corner_map:
+                info = corner_map[cat_l]
+                return json.dumps({
+                    "product_query": query,
+                    "category": cat_l,
+                    "corner_no": info["corner_no"],
+                    "corner_name": info.get("corner_name", f"{info['corner_no']}번 코너"),
+                }, ensure_ascii=False)
+
+    return json.dumps({
+        "message": f"'{query}'의 위치 정보를 찾을 수 없습니다.",
+        "available_categories": list(corner_map.keys()),
+    }, ensure_ascii=False)
+
+
+def _tool_get_discount_ranking(
+    db: Session,
+    category: str = "",
+    limit: int = 5,
+) -> str:
+    """get_discount_ranking tool: 할인율 높은 상품 조회."""
+    product_columns = _table_columns(db, "products")
+    price_columns = _table_columns(db, "product_prices")
+    if not product_columns or not price_columns:
+        return json.dumps({"results": []}, ensure_ascii=False)
+
+    required = {"id", "item_no", "product_name"}
+    if not required.issubset(set(product_columns)):
+        return json.dumps({"results": []}, ensure_ascii=False)
+    if not {"id", "product_id", "is_discounted"}.issubset(set(price_columns)):
+        return json.dumps({"results": []}, ensure_ascii=False)
+
+    select_cols = ["p.`item_no`", "p.`product_name`"]
+    if "category_l" in product_columns:
+        select_cols.append("p.`category_l`")
+    if "discount_rate" in price_columns:
+        select_cols.append("pp.`discount_rate`")
+    if "discount_amount" in price_columns:
+        select_cols.append("pp.`discount_amount`")
+    if "price" in price_columns:
+        select_cols.append("pp.`price`")
+
+    where_parts = ["pp.`is_discounted` = 1"]
+    params: dict[str, Any] = {"limit": max(1, min(limit, 20))}
+
+    if category:
+        cat_clauses = []
+        params["cat_kw"] = f"%{category}%"
+        for col in ("category_l", "category_m", "category_s"):
+            if col in product_columns:
+                cat_clauses.append(f"p.`{col}` LIKE :cat_kw")
+        if cat_clauses:
+            where_parts.append("(" + " OR ".join(cat_clauses) + ")")
+
+    order_terms: list[str] = []
+    if "discount_rate" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_rate`, 0) DESC")
+    if "discount_amount" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_amount`, 0) DESC")
+    order_terms.append("p.`id` DESC")
+
+    sql = (
+        f"SELECT {', '.join(select_cols)} "
+        "FROM products p "
+        "JOIN product_prices pp ON pp.`product_id` = p.`id` "
+        f"WHERE {' AND '.join(where_parts)} "
+        f"ORDER BY {', '.join(order_terms)} "
+        "LIMIT :limit"
+    )
+    try:
+        rows = db.execute(text(sql), params).mappings().all()
+    except SQLAlchemyError:
+        return json.dumps({"results": []}, ensure_ascii=False)
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        item_no = str(row.get("item_no") or "").strip()
+        if item_no and item_no in seen:
+            continue
+        if item_no:
+            seen.add(item_no)
+        entry: dict[str, Any] = {k: v for k, v in dict(row).items() if v is not None}
+        results.append(entry)
+
+    return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False, default=str)
+
+
+def _tool_get_nutrition_info(
+    db: Session,
+    keyword: str = "",
+    nutrient: str = "",
+    rank_order: str = "",
+) -> str:
+    """get_nutrition_info tool: 상품 영양정보 조회."""
+    product_columns = _table_columns(db, "products")
+    if not product_columns:
+        return json.dumps({"error": "상품 테이블 없음"}, ensure_ascii=False)
+
+    nutrition_columns = [
+        col for col in product_columns
+        if any(key in col.lower() for key in ("nutrition", "nutri", "kcal", "calorie", "protein", "carb", "fat", "sodium", "sugar"))
+    ]
+    if not nutrition_columns:
+        return json.dumps({"error": "영양정보 컬럼이 없습니다."}, ensure_ascii=False)
+
+    # Search products by keyword
+    product_rows, terms = _query_catalog_products(db, keyword, product_columns, _MAX_CATALOG_MATCH_ROWS)
+    if not product_rows:
+        return json.dumps({"results": [], "message": f"'{keyword}' 관련 상품을 찾을 수 없습니다."}, ensure_ascii=False)
+
+    results: list[dict[str, Any]] = []
+    for row in product_rows[:8]:
+        entry: dict[str, Any] = {
+            "item_no": str(row.get("item_no") or ""),
+            "product_name": str(row.get("product_name") or ""),
+        }
+        for col in nutrition_columns:
+            raw = row.get(col)
+            if raw is not None:
+                parsed = _maybe_json(raw)
+                if parsed is not None:
+                    entry[col] = parsed
+        results.append(entry)
+
+    # If a specific nutrient + rank_order requested, sort
+    if nutrient and rank_order and results:
+        aliases = _NUTRIENT_ALIAS_MAP.get(nutrient)
+        if not aliases:
+            for name, alias_tuple in _NUTRIENT_ALIAS_MAP.items():
+                if nutrient in alias_tuple or nutrient == name:
+                    aliases = alias_tuple
+                    break
+        if aliases:
+            scored: list[tuple[dict, float]] = []
+            for entry in results:
+                pairs = _collect_nutrition_pairs(entry)
+                val = _extract_nutrient_value_from_pairs(nutrient, aliases, pairs)
+                if val is not None:
+                    num = _numeric_from_text(val)
+                    if num is not None:
+                        entry["_nutrient_value"] = val
+                        scored.append((entry, num))
+            scored.sort(key=lambda x: x[1], reverse=(rank_order == "highest"))
+            results = [e for e, _ in scored]
+
+    return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False, default=str)
+
+
+def _execute_tool(db: Session, tool_name: str, args: dict) -> str:
+    """tool_call 실행 디스패처."""
+    try:
+        if tool_name == "search_products":
+            return _tool_search_products(db, **args)
+        elif tool_name == "get_product_detail":
+            return _tool_get_product_detail(db, **args)
+        elif tool_name == "get_corner_location":
+            return _tool_get_corner_location(db, **args)
+        elif tool_name == "get_discount_ranking":
+            return _tool_get_discount_ranking(db, **args)
+        elif tool_name == "get_nutrition_info":
+            return _tool_get_nutrition_info(db, **args)
+        else:
+            return json.dumps({"error": f"Unknown tool: {tool_name}"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": f"Tool execution error: {e}"}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# LLM call helper
+# ---------------------------------------------------------------------------
+
+def _is_local_llm() -> bool:
+    """LM Studio / Ollama 등 로컬 LLM 서버인지 판별."""
+    url = os.getenv("HF_CHAT_API", "http://localhost:1234/v1/chat/completions")
+    return "localhost" in url or "127.0.0.1" in url
+
+
+def _call_llm(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> dict:
+    """OpenAI-compatible LLM 호출. 로컬(LM Studio/Ollama) + 원격(HF Router) 모두 지원."""
+    import logging
+    logger = logging.getLogger("backend.chatbot")
+
+    hf_model = os.getenv("HF_CHAT_MODEL", "gemma-4-4b")
+    hf_api_url = os.getenv(
+        "HF_CHAT_API", "http://localhost:1234/v1/chat/completions"
+    )
+    hf_token = _get_hf_token()
+    is_local = _is_local_llm()
+
+    if not hf_token and not is_local:
+        raise RuntimeError(
+            "HF_TOKEN이 설정되지 않았습니다. "
+            "로컬 LLM을 사용하려면 HF_CHAT_API를 http://localhost:1234/v1/chat/completions 로 설정하세요."
+        )
+
+    # 로컬 서버는 인증 헤더 불필요
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if hf_token and not is_local:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    payload: dict[str, Any] = {
+        "model": hf_model,
+        "messages": messages,
+        "max_tokens": 800,
+        "temperature": 0.4,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    try:
+        resp = httpx.post(hf_api_url, headers=headers, json=payload, timeout=60.0)
+    except httpx.ConnectError:
+        raise RuntimeError(
+            f"LLM 서버({hf_api_url})에 연결할 수 없습니다. "
+            "LM Studio가 실행 중이고 서버가 시작되어 있는지 확인하세요."
+        )
+
+    # 400 + tools → tools 빼고 재시도
+    if resp.status_code == 400 and tools:
+        logger.warning("LLM 400 with tools, retrying without tools.")
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        cleaned = []
+        for m in messages:
+            if m.get("role") == "tool":
+                continue
+            if m.get("role") == "assistant" and m.get("tool_calls") and not (m.get("content") or "").strip():
+                continue
+            cleaned.append(m)
+        payload["messages"] = cleaned
+        resp = httpx.post(hf_api_url, headers=headers, json=payload, timeout=60.0)
+
+    if resp.status_code in {404, 410}:
+        raise RuntimeError(
+            f"LLM 모델({hf_model})을 찾을 수 없습니다. "
+            "LM Studio에서 모델이 로드되어 있는지 확인하세요."
+        )
+    if resp.status_code == 503:
+        raise RuntimeError("LLM 모델이 아직 로딩 중입니다. 잠시 후 다시 시도해 주세요.")
+    if resp.status_code == 400:
+        try:
+            detail = resp.json().get("error", resp.text[:300])
+            if isinstance(detail, dict):
+                detail = detail.get("message", str(detail))
+        except Exception:
+            detail = resp.text[:300]
+        raise RuntimeError(f"LLM 오류(400): {detail}")
+    if not is_local:
+        if resp.status_code == 401:
+            raise RuntimeError("HF_TOKEN 인증 실패.")
+        if resp.status_code in {402, 403}:
+            raise RuntimeError("HF 토큰 권한 문제. Inference Providers 권한을 확인하세요.")
+
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not isinstance(data, dict) or not isinstance(data.get("choices"), list) or not data["choices"]:
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(f"LLM 오류: {data['error']}")
+        raise RuntimeError("LLM 응답을 해석할 수 없습니다.")
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Cart context builder (for system prompt)
+# ---------------------------------------------------------------------------
+
+def _build_cart_context_text(products: list[ProductMeta], total: dict[str, Any]) -> str:
+    """장바구니 정보를 텍스트로 변환 (system prompt 삽입용)."""
     cart_lines: list[str] = []
     for item in products:
         price_str = f"{item.unit_price:,}원" if item.unit_price is not None else "가격 미등록"
@@ -1779,138 +2386,159 @@ def _answer_question(
         f"가격 등록 상품: {total['priced_items']}종, "
         f"가격 미등록: {unpriced_text}"
     )
+    return f"{cart_text}\n\n합계: {total_text}"
 
-    catalog_schema_text = "카탈로그 스키마 정보 없음"
-    catalog_summary_text = "카탈로그 요약 정보 없음"
-    catalog_matches_text = "질문 관련 카탈로그 데이터 없음"
-    catalog_discount_text = "할인 스냅샷 없음"
-    catalog_price_text = "가격 스냅샷 없음"
-    catalog_nutrition_text = "영양 스냅샷 없음"
-    catalog_corner_text = "코너 매핑 정보 없음"
 
+def _answer_question(
+    question: str,
+    products: list[ProductMeta],
+    total: dict[str, Any],
+    db: Session,
+    chat_history: list[dict] | None = None,
+) -> str:
+    """LLM 답변 생성. 로컬 소형모델은 context-injection, 원격 대형모델은 Tool Use."""
+    import logging
+    logger = logging.getLogger("backend.chatbot")
+
+    q = question.strip()
+    if not q:
+        return "질문을 입력해 주세요. 예: '총 금액 얼마야?'"
+
+    # 로컬 소형 모델 → Tool Use 건너뛰고 바로 context-injection (안정적 + 빠름)
+    if _is_local_llm():
+        return _answer_question_with_context(q, products, total, db, chat_history)
+
+    # --- 원격 대형 모델: Tool Use 시도 ---
+    try:
+        cart_context = _build_cart_context_text(products, total)
+        system_content = SYSTEM_PROMPT + "\n\n## 현재 장바구니\n" + cart_context
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+        ]
+        if chat_history:
+            messages.extend(chat_history)
+        messages.append({"role": "user", "content": q})
+
+        data = _call_llm(messages, tools=CHATBOT_TOOLS)
+        choice = data["choices"][0]
+        msg = choice["message"]
+
+        tool_calls = msg.get("tool_calls")
+        if not tool_calls:
+            content = msg.get("content", "")
+            if content and str(content).strip():
+                return str(content).strip()
+            raise RuntimeError("empty_response")
+
+        # Tool Use 루프
+        messages.append(msg)
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            try:
+                fn_args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, KeyError):
+                fn_args = {}
+            result = _execute_tool(db, fn_name, fn_args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+
+        for _ in range(_MAX_TOOL_ROUNDS - 1):
+            data = _call_llm(messages, tools=CHATBOT_TOOLS)
+            choice = data["choices"][0]
+            msg = choice["message"]
+
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                content = msg.get("content", "")
+                return str(content).strip() or "답변을 생성하지 못했습니다."
+
+            messages.append(msg)
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                try:
+                    fn_args = json.loads(tc["function"]["arguments"])
+                except (json.JSONDecodeError, KeyError):
+                    fn_args = {}
+                result = _execute_tool(db, fn_name, fn_args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                return str(m["content"]).strip()
+        return "도구 호출이 반복되어 답변을 완료하지 못했습니다."
+
+    except Exception as tool_err:
+        logger.warning("Tool-use LLM failed (%s), falling back to context-injection.", tool_err)
+
+    # --- 2차: Context-injection fallback (tools 사용 안 함) ---
+    return _answer_question_with_context(q, products, total, db, chat_history)
+
+
+def _answer_question_with_context(
+    question: str,
+    products: list[ProductMeta],
+    total: dict[str, Any],
+    db: Session,
+    chat_history: list[dict] | None = None,
+) -> str:
+    """Tool 미지원 fallback: 기존 방식으로 DB context를 사전 빌드하여 LLM에 전달."""
+    q = question.strip()
+    cart_context = _build_cart_context_text(products, total)
+    catalog_context = _build_catalog_context(db, q)
+
+    catalog_text_parts: list[str] = []
     if catalog_context and catalog_context.get("available"):
-        catalog_schema_text = _json_for_prompt(catalog_context.get("schema") or {})
-        catalog_summary_text = _json_for_prompt(catalog_context.get("summary") or {})
-        catalog_matches_text = _json_for_prompt(catalog_context.get("matched_products") or [])
-        catalog_discount_text = _json_for_prompt(catalog_context.get("discount_snapshot") or [])
-        catalog_price_text = _json_for_prompt(catalog_context.get("price_snapshot") or {})
-        catalog_nutrition_text = _json_for_prompt(catalog_context.get("nutrition_snapshot") or {})
-        catalog_corner_text = _json_for_prompt(catalog_context.get("corner_map") or {})
+        for key in ("matched_products", "discount_snapshot", "price_snapshot",
+                     "nutrition_snapshot", "nutrition_rank_snapshot", "corner_map"):
+            val = catalog_context.get(key)
+            if val:
+                catalog_text_parts.append(f"[{key}]\n{_json_for_prompt(val)}")
 
-    prompt = f"""
-아래는 사용자의 장바구니 정보와 카탈로그 DB 스냅샷입니다.
+    catalog_text = "\n\n".join(catalog_text_parts) if catalog_text_parts else "검색 결과 없음"
 
-상품 목록:
-{cart_text}
+    # 로컬 소형 모델: 간결한 프롬프트 + 구조적 context
+    is_local = _is_local_llm()
+    sys_prompt = SYSTEM_PROMPT_LOCAL if is_local else SYSTEM_PROMPT
 
-합계:
-{total_text}
-
-카탈로그 스키마:
-{catalog_schema_text}
-
-카탈로그 요약:
-{catalog_summary_text}
-
-질문 관련 카탈로그 데이터:
-{catalog_matches_text}
-
-할인 스냅샷:
-{catalog_discount_text}
-
-가격 스냅샷:
-{catalog_price_text}
-
-영양 스냅샷:
-{catalog_nutrition_text}
-
-카테고리-코너 매핑:
-{catalog_corner_text}
-
-사용자 질문:
-{q}
-
-위 정보를 참고해서 친절하게 답변해 주세요.
-- 가격이 미등록인 상품에 대해서는 '가격 정보가 DB에 아직 등록되지 않았습니다'라고 안내하세요.
-- 상품 목록에 없는 제품을 물어보면 '장바구니에 해당 상품이 없습니다'라고 안내하세요.
-- 장바구니가 비어있으면 '현재 장바구니가 비어있습니다. 상품을 담아주세요.'라고 안내하세요.
-- 질문이 장바구니가 아닌 카탈로그(DB) 정보 관련이면 카탈로그 데이터 기준으로 답변하세요.
-- 카탈로그 질문에서는 장바구니 상태를 먼저 언급하지 말고, 질문한 상품 정보부터 답변하세요.
-- 영양소/칼로리 질문은 nutrition 관련 DB 컬럼(예: nutrition_info) 값을 우선 사용해 답하세요.
-- 카탈로그 데이터에서 확인되지 않는 내용은 '현재 DB에서 확인되지 않습니다'라고 명확히 말하세요.
-"""
-
-    # --- HuggingFace Router API (OpenAI-compatible) ---
-    hf_model = os.getenv("HF_CHAT_MODEL", "Qwen/Qwen2.5-72B-Instruct")
-    hf_api_url = os.getenv(
-        "HF_CHAT_API", "https://router.huggingface.co/v1/chat/completions"
+    user_prompt = (
+        f"## 장바구니 현황\n{cart_context}\n\n"
+        f"## 질문 관련 상품 DB 검색 결과\n{catalog_text}\n\n"
+        f"## 사용자 질문\n{q}\n\n"
+        "위 DB 검색 결과를 기반으로 답변해주세요.\n"
+        "- 검색 결과에 있는 상품 정보를 활용하세요.\n"
+        "- 상품명에 포함된 브랜드, 중량 정보도 함께 안내하세요.\n"
+        "- 가격은 쉼표와 '원' 단위를 붙여주세요."
     )
-    hf_token = _get_hf_token()
 
-    if not hf_token:
-        return "HuggingFace LLM 토큰이 설정되지 않았습니다. 환경변수 HF_TOKEN을 등록하세요."
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": sys_prompt},
+    ]
+    if chat_history:
+        # tool/tool_calls 관련 메시지 필터링
+        for m in chat_history:
+            role = m.get("role", "")
+            if role == "tool":
+                continue
+            if role == "assistant" and m.get("tool_calls") and not m.get("content"):
+                continue
+            if role in ("user", "assistant", "system"):
+                messages.append({"role": role, "content": str(m.get("content", ""))})
+    messages.append({"role": "user", "content": user_prompt})
 
     try:
-        resp = httpx.post(
-            hf_api_url,
-            headers={
-                "Authorization": f"Bearer {hf_token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": hf_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "당신은 한국어 쇼핑 도우미입니다. "
-                            "반드시 제공된 DB/장바구니 정보만 근거로 답하고, "
-                            "없는 정보는 없다고 말하세요."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 300,
-                "temperature": 0.2,
-            },
-            timeout=30.0,
-        )
-
-        if resp.status_code in {404, 410}:
-            return (
-                f"LLM 모델({hf_model})을 찾을 수 없습니다. "
-                "HF_CHAT_MODEL 환경변수를 다른 공개 모델로 바꿔주세요."
-            )
-        if resp.status_code == 503:
-            return "LLM 모델이 아직 로딩 중입니다. 잠시 후 다시 시도해 주세요."
-        if resp.status_code == 401:
-            return "HF_TOKEN 인증에 실패했습니다. 토큰 값/만료 상태를 확인해 주세요."
-        if resp.status_code == 403:
-            return (
-                "HF 토큰은 인식되었지만 Inference Providers 호출 권한이 없습니다. "
-                "HuggingFace 토큰 권한에서 Inference Providers 권한을 활성화해 주세요."
-            )
-        if resp.status_code == 402:
-            return "현재 선택한 모델은 과금이 필요할 수 있습니다. 다른 무료 모델로 변경해 주세요."
-
-        resp.raise_for_status()
-        data = resp.json()
-
-        if (
-            isinstance(data, dict)
-            and isinstance(data.get("choices"), list)
-            and data["choices"]
-            and isinstance(data["choices"][0], dict)
-            and isinstance(data["choices"][0].get("message"), dict)
-        ):
-            content = data["choices"][0]["message"].get("content", "")
-            return str(content).strip() or "LLM 응답이 비어 있습니다."
-
-        if "error" in data:
-            return f"LLM 오류: {data['error']}"
-
-        return "LLM 응답을 해석할 수 없습니다."
-
+        data = _call_llm(messages, tools=None)
+        content = data["choices"][0]["message"].get("content", "")
+        return str(content).strip() or "답변을 생성하지 못했습니다."
+    except RuntimeError as e:
+        return str(e)
     except Exception as e:
         return f"LLM 호출 오류: {e}"
 
@@ -1943,6 +2571,7 @@ async def query_chatbot(req: ChatbotRequest, db: Session = Depends(get_db)):
     """Process a natural-language question about the current cart."""
     billing_items: dict[str, int] = {}
     cart_update: dict[str, Any] | None = None
+    session = None
 
     if req.session_id:
         session = app_state.session_manager.get(req.session_id)
@@ -2138,8 +2767,17 @@ async def query_chatbot(req: ChatbotRequest, db: Session = Depends(get_db)):
             f"현재 총 수량은 {total['total_count']}개이고 총 금액은 {total['total_price']:,}원입니다."
         )
     else:
-        catalog_context = _build_catalog_context(db, req.question)
-        answer = _answer_question(req.question, products, total, catalog_context)
+        # Phase 2: Tool Use 기반 에이전틱 호출 (catalog_context 사전 빌드 불필요)
+        chat_history = session.state.get("chatbot_history", []) if req.session_id and session else []
+        answer = _answer_question(req.question, products, total, db, chat_history)
+
+    # 대화 히스토리 갱신 (cart action이 아닌 LLM 호출 시에만)
+    if req.session_id and session and not cart_update:
+        history = session.state.get("chatbot_history", [])
+        history.append({"role": "user", "content": req.question})
+        history.append({"role": "assistant", "content": answer})
+        max_entries = _MAX_CHAT_HISTORY_TURNS * 2
+        session.state["chatbot_history"] = history[-max_entries:]
 
     return {
         "answer": answer,

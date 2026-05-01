@@ -15,7 +15,7 @@ export default function LoginPage() {
     mutationFn: () => login(username, password),
     onSuccess: (data) => {
       setAuth(data.access_token, data.user);
-      navigate("/"); // Redirect to home after login
+      navigate("/");
     },
   });
 
@@ -25,81 +25,80 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--color-bg)]">
-      <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-2xl shadow-xl border border-[var(--color-border)]">
-        {/* Logo */}
+    <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--color-bg)] px-6 py-8">
+      <div className="w-full max-w-sm bg-white rounded-3xl shadow-[var(--shadow-lg)] border border-[var(--color-border)] p-8">
         <div className="flex flex-col items-center">
-          <img
-            src="/jangbogo.svg"
-            alt="장보GO 로고"
-            className="w-16 h-16 rounded-2xl object-cover mb-4"
-          />
-          <h2 className="text-center text-3xl font-bold text-[var(--color-text)]">
-            장보GO!
-          </h2>
-          <p className="mt-2 text-center text-sm text-[var(--color-text-secondary)]">
-            로그인
+          <div
+            className="w-[88px] h-[88px] rounded-[24px] bg-white flex items-center justify-center mb-5"
+            style={{ boxShadow: "0 10px 25px rgba(249,115,22,0.2)" }}
+          >
+            <img
+              src="/jangbogo.svg"
+              alt="장보GO"
+              className="w-16 h-16 rounded-2xl object-cover"
+            />
+          </div>
+          <div className="text-[28px] font-extrabold text-[var(--color-text)] tracking-tight">
+            장보<span className="text-[var(--color-primary)]">GO</span>
+          </div>
+          <p className="text-sm text-[var(--color-text-secondary)] mt-1 mb-7">
+            카메라로 담고, 바로 결제하세요
           </p>
         </div>
 
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="username" className="block text-sm font-medium text-[var(--color-text)]">
-                아이디
-              </label>
-              <input
-                id="username"
-                name="username"
-                type="text"
-                required
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="mt-1 block w-full px-4 py-2.5 border border-[var(--color-border)] rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)] transition-colors"
-                placeholder="아이디를 입력하세요..."
-              />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-[var(--color-text)]">
-                비밀번호
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="mt-1 block w-full px-4 py-2.5 border border-[var(--color-border)] rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)] transition-colors"
-                placeholder="••••••••"
-              />
-            </div>
-          </div>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-2.5">
+          <input
+            id="username"
+            type="text"
+            required
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="아이디"
+            autoComplete="username"
+            className="w-full h-12 px-4 bg-slate-50 border border-[var(--color-border)] rounded-xl text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)] transition-colors"
+          />
+          <input
+            id="password"
+            type="password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="비밀번호"
+            autoComplete="current-password"
+            className="w-full h-12 px-4 bg-slate-50 border border-[var(--color-border)] rounded-xl text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)] transition-colors"
+          />
 
           {mutation.isError && (
-            <div className="text-sm text-[var(--color-danger)] bg-red-50 p-3 rounded-lg border border-red-100">
+            <div className="text-sm text-[var(--color-danger)] bg-[var(--jb-danger-50)] border border-[var(--jb-danger-100)] rounded-xl px-4 py-2.5 mt-1">
               {(mutation.error as Error).message}
             </div>
           )}
 
-          <div>
-            <button
-              type="submit"
-              disabled={mutation.isPending}
-              className="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-semibold text-white bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[var(--color-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {mutation.isPending ? "로그인 중..." : "로그인"}
-            </button>
-          </div>
-
-          <div className="text-center text-sm">
-            <span className="text-[var(--color-text-secondary)]">계정이 없으신가요? </span>
-            <Link to="/signup" className="font-semibold text-[var(--color-primary)] hover:text-[var(--color-primary-hover)] transition-colors">
-              회원가입
-            </Link>
-          </div>
+          <button
+            type="submit"
+            disabled={mutation.isPending}
+            className="w-full h-12 mt-4 rounded-xl bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white text-[16px] font-bold transition-colors disabled:opacity-60 disabled:cursor-not-allowed shadow-[0_6px_20px_rgba(249,115,22,0.25)]"
+          >
+            {mutation.isPending ? "로그인 중..." : "로그인"}
+          </button>
         </form>
+
+        <div className="flex items-center justify-center gap-3.5 mt-5 text-[13px] text-[var(--color-text-secondary)]">
+          <Link
+            to="/signup"
+            className="hover:text-[var(--color-primary)] transition-colors"
+          >
+            회원가입
+          </Link>
+          <span className="text-[var(--color-border-strong)]">·</span>
+          <button
+            type="button"
+            onClick={() => alert("비밀번호 찾기 기능은 준비 중입니다.")}
+            className="hover:text-[var(--color-primary)] transition-colors"
+          >
+            비밀번호 찾기
+          </button>
+        </div>
       </div>
     </div>
   );

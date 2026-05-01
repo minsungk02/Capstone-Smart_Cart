@@ -221,14 +221,18 @@ async def add_product(
     dino_dim = bundle["dino_dim"]
     clip_dim = bundle["clip_dim"]
 
-    # Generate raw embeddings for each image
+    # Generate raw embeddings for each image (and capture the first photo for use as the
+    # representative product image).
     new_raw_list: list[np.ndarray] = []
-    for upload in images:
+    first_image_pil: Image.Image | None = None
+    for idx, upload in enumerate(images):
         data = await upload.read()
         try:
             img = Image.open(BytesIO(data)).convert("RGB")
         except Exception:
             raise HTTPException(status_code=422, detail=f"Invalid image: {upload.filename}")
+        if idx == 0:
+            first_image_pil = img.copy()
         bgr = _pil_to_bgr(img)
         raw_emb = _build_raw_embedding(bgr)
         new_raw_list.append(raw_emb)
@@ -289,6 +293,41 @@ async def add_product(
     if not product_id:
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to create product record")
+
+    # Save the first uploaded photo as the representative product image and persist its URL.
+    # Saved as a normalized JPEG keyed by item_no so re-registrations overwrite cleanly.
+    picture_url: str | None = None
+    if first_image_pil is not None:
+        try:
+            config.PRODUCT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+            target_path = config.PRODUCT_IMAGES_DIR / f"{clean_item_no}.jpg"
+            # Cap dimensions so very large captures don't bloat storage / payload.
+            max_side = 1024
+            saved_img = first_image_pil
+            if max(saved_img.size) > max_side:
+                saved_img = saved_img.copy()
+                saved_img.thumbnail((max_side, max_side), Image.LANCZOS)
+            saved_img.save(target_path, format="JPEG", quality=88, optimize=True)
+            picture_url = f"{config.PRODUCT_IMAGES_URL_PREFIX}/{clean_item_no}.jpg"
+        except Exception as exc:
+            logger.warning("Failed to save product image for %s: %s", clean_item_no, exc)
+            picture_url = None
+
+    if picture_url:
+        try:
+            db.execute(
+                text(
+                    """
+                    UPDATE products
+                    SET picture = :picture, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id
+                    """
+                ),
+                {"picture": picture_url, "id": product_id},
+            )
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
 
     # Acquire writer lock: blocks all inference requests until update completes
     async with app_state.index_rwlock.writer_lock:
@@ -753,6 +792,14 @@ async def delete_product(item_no: str, db: Session = Depends(get_db)):
     except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
+
+    # Best-effort cleanup of the representative image on disk.
+    image_path = config.PRODUCT_IMAGES_DIR / f"{clean_item_no}.jpg"
+    try:
+        if image_path.exists():
+            image_path.unlink()
+    except OSError as exc:
+        logger.warning("Failed to remove product image %s: %s", image_path, exc)
 
     return {
         "status": "deleted",

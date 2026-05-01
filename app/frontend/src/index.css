@@ -1,40 +1,160 @@
 @import "tailwindcss";
 
+/* =============================================================================
+   MaruBuri — serif display accent (hero quotes / receipt header only)
+   ========================================================================== */
+@font-face {
+  font-family: "MaruBuri";
+  src: url("/fonts/MaruBuri-Light.ttf") format("truetype");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MaruBuri";
+  src: url("/fonts/MaruBuri-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MaruBuri";
+  src: url("/fonts/MaruBuri-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  /* Primary - Orange */
-  --color-primary: #f97316;
-  --color-primary-hover: #ea580c;
-  --color-primary-light: #ffedd5;
+  /* ---------- Brand / Primary — Orange (장보GO signature) ---------- */
+  --jb-primary-50: #fff7ed;
+  --jb-primary-100: #ffedd5;
+  --jb-primary-200: #fed7aa;
+  --jb-primary-300: #fdba74;
+  --jb-primary-400: #fb923c;
+  --jb-primary-500: #f97316;
+  --jb-primary-600: #ea580c;
+  --jb-primary-700: #c2410c;
+  --jb-primary-800: #9a3412;
+  --jb-primary-900: #7c2d12;
 
-  /* Secondary - Blue */
-  --color-secondary: #3b82f6;
-  --color-secondary-hover: #2563eb;
-  --color-secondary-light: #dbeafe;
+  /* Amber accent — paired with orange in chart gradients */
+  --jb-amber-300: #fcd34d;
+  --jb-amber-400: #fbbf24;
+  --jb-amber-500: #f59e0b;
 
-  /* Success - Green */
-  --color-success: #22c55e;
-  --color-success-hover: #16a34a;
-  --color-success-light: #dcfce7;
+  /* Secondary — Blue */
+  --jb-secondary-100: #dbeafe;
+  --jb-secondary-500: #3b82f6;
+  --jb-secondary-600: #2563eb;
 
-  /* Danger - Red */
-  --color-danger: #ef4444;
-  --color-danger-hover: #dc2626;
+  /* Success — Green */
+  --jb-success-100: #dcfce7;
+  --jb-success-500: #22c55e;
+  --jb-success-600: #16a34a;
 
-  /* Warning - Amber */
-  --color-warning: #f59e0b;
+  /* Danger — Red */
+  --jb-danger-50: #fef2f2;
+  --jb-danger-100: #fee2e2;
+  --jb-danger-500: #ef4444;
+  --jb-danger-600: #dc2626;
+  --jb-danger-700: #b91c1c;
 
-  /* Neutral */
-  --color-bg: #f8fafc;
-  --color-surface: #ffffff;
-  --color-sidebar: #fffbf5;
-  --color-text: #0f172a;
-  --color-text-secondary: #64748b;
-  --color-border: #e2e8f0;
+  /* Neutral — Slate */
+  --jb-slate-50: #f8fafc;
+  --jb-slate-100: #f1f5f9;
+  --jb-slate-200: #e2e8f0;
+  --jb-slate-300: #cbd5e1;
+  --jb-slate-400: #94a3b8;
+  --jb-slate-500: #64748b;
+  --jb-slate-700: #334155;
+  --jb-slate-900: #0f172a;
+
+  --jb-sidebar-bg: #fffbf5;
+  --jb-surface: #ffffff;
+  --jb-camera-bg: #1e293b;
+
+  /* ---------- Semantic tokens (preserved names for app code) ---------- */
+  --color-bg: var(--jb-slate-50);
+  --color-surface: var(--jb-surface);
+  --color-sidebar: var(--jb-sidebar-bg);
+  --color-camera-bg: var(--jb-camera-bg);
+
+  --color-text: var(--jb-slate-900);
+  --color-text-secondary: var(--jb-slate-500);
+  --color-text-muted: var(--jb-slate-400);
+  --color-text-on-primary: #ffffff;
+
+  --color-border: var(--jb-slate-200);
+  --color-border-strong: var(--jb-slate-300);
+
+  --color-primary: var(--jb-primary-500);
+  --color-primary-hover: var(--jb-primary-600);
+  --color-primary-light: var(--jb-primary-100);
+
+  --color-secondary: var(--jb-secondary-500);
+  --color-secondary-hover: var(--jb-secondary-600);
+  --color-secondary-light: var(--jb-secondary-100);
+
+  --color-success: var(--jb-success-500);
+  --color-success-hover: var(--jb-success-600);
+  --color-success-light: var(--jb-success-100);
+
+  --color-danger: var(--jb-danger-500);
+  --color-danger-hover: var(--jb-danger-600);
+
+  --color-warning: var(--jb-amber-500);
+
+  /* Radii */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1rem;
+  --radius-pill: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.08);
+
+  /* Type families */
+  --font-sans: "Pretendard", "Pretendard Variable", "Inter", system-ui,
+    -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR",
+    "Malgun Gothic", sans-serif;
+  --font-serif: "MaruBuri", "Nanum Myeongjo", "Apple SD Gothic Neo", serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 300ms;
+
+  /* Admin chart gradients (matches design_handoff_jangbogo) */
+  --chart-orange-from: var(--jb-primary-500);
+  --chart-orange-to: var(--jb-amber-400);
+  --chart-area-from: rgb(249 115 22 / 0.28);
+  --chart-area-to: rgb(249 115 22 / 0.02);
+}
+
+html,
+body {
+  overscroll-behavior: none;
+  background-color: var(--color-bg);
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
   margin: 0;
-  background-color: var(--color-bg);
   color: var(--color-text);
-  font-family: "Pretendard", "Inter", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.font-serif {
+  font-family: var(--font-serif);
 }

@@ -3,77 +3,41 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "../stores/authStore";
 import {
-  getDashboardStats,
   getDiscountCategories,
   getDiscountProducts,
   getPopularProducts,
 } from "../api/purchases";
 
-const PERIOD_OPTIONS = [7, 30, 90] as const;
-type PeriodDays = (typeof PERIOD_OPTIONS)[number];
-
-const formatAmount = (value: number) => `₩${(value ?? 0).toLocaleString("ko-KR")}`;
-const formatDiscountAmount = (value: number) => `₩${Math.max(0, value ?? 0).toLocaleString("ko-KR")}`;
+const formatDiscountAmount = (value: number) =>
+  `₩${Math.max(0, value ?? 0).toLocaleString("ko-KR")}`;
 
 function formatDiscountRate(value: number): string {
   const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
   return `${safe.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1")}%`;
 }
 
-function formatCompactAmount(value: number): string {
-  if (value <= 0) return "0";
-  if (value >= 100000000) return `${(value / 100000000).toFixed(1)}억`;
-  if (value >= 10000) return `${Math.round(value / 10000)}만`;
-  return `${Math.round(value / 1000)}천`;
-}
-
-function formatDateLabel(date: string): string {
-  return new Date(date).toLocaleDateString("ko-KR", {
-    month: "numeric",
-    day: "numeric",
-  });
-}
-
-function buildOrderTicks(maxValue: number): number[] {
-  const ratios = [1, 0.75, 0.5, 0.25, 0];
-  const raw = ratios.map((ratio) => Math.round(maxValue * ratio));
-  const unique = Array.from(new Set(raw));
-  if (!unique.includes(0)) unique.push(0);
-  return unique;
-}
-
 export default function HomePage() {
-  const { isAdmin, token } = useAuthStore();
-  const isAdminUser = isAdmin();
-  const [periodDays, setPeriodDays] = useState<PeriodDays>(7);
+  const { token } = useAuthStore();
   const [failedPopularImages, setFailedPopularImages] = useState<Record<string, true>>({});
   const [selectedDiscountCategory, setSelectedDiscountCategory] = useState("");
   const [failedDiscountImages, setFailedDiscountImages] = useState<Record<string, true>>({});
 
-  // Fetch dashboard stats for admin
-  const { data: stats, isLoading } = useQuery({
-    queryKey: ["dashboard", "stats", periodDays, token],
-    queryFn: () => getDashboardStats(token!, periodDays),
-    enabled: isAdminUser && !!token,
-  });
-
-  // Fetch popular TOP5 for user home section (non-admin only)
   const { data: userPopularProducts = [] } = useQuery({
     queryKey: ["popular-products", "user-popup", token],
     queryFn: () => getPopularProducts(token!, 5),
-    enabled: !isAdminUser && !!token,
+    enabled: !!token,
   });
 
   const { data: discountCategories = [], isLoading: isDiscountCategoriesLoading } = useQuery({
     queryKey: ["discount-categories", "user-home", token],
     queryFn: () => getDiscountCategories(token!),
-    enabled: !isAdminUser && !!token,
+    enabled: !!token,
   });
 
   const { data: discountProducts = [], isLoading: isDiscountProductsLoading } = useQuery({
     queryKey: ["discount-products", "user-home", token, selectedDiscountCategory],
     queryFn: () => getDiscountProducts(token!, selectedDiscountCategory, 5),
-    enabled: !isAdminUser && !!token && selectedDiscountCategory.length > 0,
+    enabled: !!token && selectedDiscountCategory.length > 0,
   });
 
   useEffect(() => {
@@ -96,306 +60,6 @@ export default function HomePage() {
     setFailedDiscountImages({});
   }, [selectedDiscountCategory, discountProducts]);
 
-  // Admin Dashboard
-  if (isAdminUser) {
-    const dailyStats = stats?.daily_stats ?? [];
-    const maxOrderCount = Math.max(1, ...dailyStats.map((row) => row.purchase_count));
-    const maxPopularCount = Math.max(1, ...(stats?.popular_products ?? []).map((p) => p.total_count));
-    const orderTicks = buildOrderTicks(maxOrderCount);
-    const chartMinWidth = Math.max(560, dailyStats.length * 42);
-    const revenueBadgeStride =
-      dailyStats.length <= 10 ? 1 : dailyStats.length <= 30 ? 3 : 7;
-    const labelStride =
-      dailyStats.length <= 14 ? 1 : dailyStats.length <= 40 ? 4 : 8;
-
-    return (
-      <div className="p-4 md:p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
-        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-[var(--color-text)] mb-1">
-              관리자 대시보드
-            </h1>
-            <p className="text-sm md:text-base text-[var(--color-text-secondary)]">
-              매출/주문 추이와 고객 구매 패턴을 한눈에 확인하세요
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link
-              to="/products"
-              className="inline-flex items-center rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm font-medium text-[var(--color-text)] hover:bg-[var(--color-bg-muted)]"
-            >
-              상품 관리
-            </Link>
-            <Link
-              to="/admin/purchases"
-              className="inline-flex items-center rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm font-medium text-[var(--color-text)] hover:bg-[var(--color-bg-muted)]"
-            >
-              구매 내역
-            </Link>
-          </div>
-        </div>
-
-        {isLoading ? (
-          <div className="text-center py-12">
-            <p className="text-[var(--color-text-secondary)]">로딩 중...</p>
-          </div>
-        ) : stats ? (
-          <>
-            <div className="relative bg-white rounded-2xl p-5 md:p-6 border border-[var(--color-border)] shadow-sm">
-              <div className="relative z-10 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                <div>
-                  <h2 className="text-xl md:text-2xl font-bold text-[var(--color-text)]">
-                    최근 {periodDays}일 매출/주문 추이
-                  </h2>
-                  <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-                    좌측 축: 주문건수, 원형 뱃지: 일매출
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="inline-flex rounded-xl border border-orange-200 bg-orange-50/70 p-1">
-                    {PERIOD_OPTIONS.map((daysOption) => (
-                      <button
-                        key={daysOption}
-                        type="button"
-                        onClick={() => setPeriodDays(daysOption)}
-                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
-                          periodDays === daysOption
-                            ? "bg-orange-500 text-white shadow-sm"
-                            : "text-orange-700 hover:bg-orange-100"
-                        }`}
-                      >
-                        {daysOption}일
-                      </button>
-                    ))}
-                  </div>
-                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-orange-50 text-orange-700 text-xs font-semibold">
-                    <span>오늘 매출</span>
-                    <span>{formatAmount(stats.today_revenue)}</span>
-                  </div>
-                </div>
-              </div>
-
-              {dailyStats.length > 0 ? (
-                <>
-                  <div className="mt-6 overflow-x-auto pb-2">
-                    <div style={{ minWidth: `${chartMinWidth}px` }}>
-                      <div className="flex items-stretch gap-2">
-                        <div className="w-10 shrink-0 h-72 relative">
-                          {orderTicks.map((tick, idx) => {
-                            const top = (idx / (orderTicks.length - 1 || 1)) * 100;
-                            return (
-                              <div
-                                key={idx}
-                                className="absolute right-0 -translate-y-1/2 text-[11px] text-orange-700 font-semibold"
-                                style={{ top: `${top}%` }}
-                              >
-                                {tick}
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        <div className="flex-1">
-                          <div className="relative h-72">
-                            {orderTicks.map((_, idx) => {
-                              const top = (idx / (orderTicks.length - 1 || 1)) * 100;
-                              return (
-                                <div
-                                  key={idx}
-                                  className="absolute left-0 right-0 border-t border-orange-100"
-                                  style={{ top: `${top}%` }}
-                                />
-                              );
-                            })}
-
-                            <div
-                              className="absolute inset-0 grid gap-2"
-                              style={{
-                                gridTemplateColumns: `repeat(${dailyStats.length}, minmax(0, 1fr))`,
-                              }}
-                            >
-                              {dailyStats.map((point, idx) => {
-                                const baseHeight =
-                                  point.purchase_count > 0
-                                    ? 10 + Math.round((point.purchase_count / maxOrderCount) * 78)
-                                    : 5;
-                                const showRevenueBadge =
-                                  idx % revenueBadgeStride === 0 || idx === dailyStats.length - 1;
-
-                                return (
-                                  <div key={point.date} className="relative flex items-end justify-center">
-                                    <div
-                                      className="w-full max-w-[24px] rounded-t-md bg-gradient-to-t from-orange-500 via-orange-400 to-amber-300"
-                                      style={{ height: `${baseHeight}%` }}
-                                    />
-                                    {showRevenueBadge && (
-                                      <div
-                                        className="absolute left-1/2 -translate-x-1/2 h-7 px-2 rounded-full border border-orange-300 bg-white text-orange-700 text-[10px] font-semibold flex items-center justify-center shadow-sm whitespace-nowrap"
-                                        style={{ bottom: `calc(${baseHeight}% + 6px)` }}
-                                      >
-                                        {formatCompactAmount(point.revenue)}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          <div
-                            className="mt-3 grid gap-2"
-                            style={{
-                              gridTemplateColumns: `repeat(${dailyStats.length}, minmax(0, 1fr))`,
-                            }}
-                          >
-                            {dailyStats.map((point, idx) => {
-                              const showLabel =
-                                idx % labelStride === 0 || idx === dailyStats.length - 1;
-                              return (
-                                <div
-                                  key={`${point.date}-label`}
-                                  className="text-center text-xs text-[var(--color-text-secondary)]"
-                                >
-                                  {showLabel ? formatDateLabel(point.date) : ""}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="mt-6 h-64 rounded-xl border border-dashed border-[var(--color-border)] flex items-center justify-center text-sm text-[var(--color-text-secondary)]">
-                  최근 7일 차트 데이터가 없습니다.
-                </div>
-              )}
-
-              <div className="mt-4 text-xs text-[var(--color-text-secondary)]">
-                과거 가격 미확정 주문은 0원으로 집계될 수 있습니다.
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-              <div className="bg-white rounded-2xl p-5 border border-[var(--color-border)] shadow-sm">
-                <p className="text-sm text-[var(--color-text-secondary)]">총 매출</p>
-                <p className="mt-2 text-2xl font-bold text-[var(--color-text)]">
-                  {formatAmount(stats.total_revenue)}
-                </p>
-              </div>
-
-              <div className="bg-white rounded-2xl p-5 border border-[var(--color-border)] shadow-sm">
-                <p className="text-sm text-[var(--color-text-secondary)]">평균 객단가</p>
-                <p className="mt-2 text-2xl font-bold text-[var(--color-text)]">
-                  {formatAmount(stats.average_order_value)}
-                </p>
-              </div>
-
-              <div className="bg-white rounded-2xl p-5 border border-[var(--color-border)] shadow-sm">
-                <p className="text-sm text-[var(--color-text-secondary)]">총 주문수</p>
-                <p className="mt-2 text-2xl font-bold text-[var(--color-text)]">
-                  {stats.total_purchases}건
-                </p>
-              </div>
-
-              <div className="bg-white rounded-2xl p-5 border border-[var(--color-border)] shadow-sm">
-                <p className="text-sm text-[var(--color-text-secondary)]">오늘 주문수</p>
-                <p className="mt-2 text-2xl font-bold text-[var(--color-text)]">
-                  {stats.today_purchases}건
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-white rounded-2xl p-6 border border-[var(--color-border)] shadow-sm">
-                <h2 className="text-lg md:text-xl font-semibold text-[var(--color-text)] mb-4 flex items-center gap-2">
-                  <span className="text-xl">🏆</span>
-                  인기 상품 TOP 5
-                </h2>
-                {stats.popular_products.length > 0 ? (
-                  <div className="space-y-3">
-                    {stats.popular_products.map((product, index) => {
-                      const ratio = Math.max(8, Math.round((product.total_count / maxPopularCount) * 100));
-                      return (
-                        <div key={product.name} className="rounded-xl border border-[var(--color-border)] p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-semibold text-[var(--color-text)]">
-                              {index + 1}. {product.name}
-                            </p>
-                            <span className="text-xs font-semibold text-[var(--color-primary)]">
-                              {product.total_count}개
-                            </span>
-                          </div>
-                          <div className="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400"
-                              style={{ width: `${ratio}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="h-40 rounded-xl border border-dashed border-[var(--color-border)] flex items-center justify-center text-sm text-[var(--color-text-secondary)]">
-                    아직 판매된 상품이 없습니다.
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-white rounded-2xl p-6 border border-[var(--color-border)] shadow-sm">
-                <h2 className="text-lg md:text-xl font-semibold text-[var(--color-text)] mb-4 flex items-center gap-2">
-                  <span className="text-xl">🧾</span>
-                  최근 구매 내역
-                </h2>
-                {stats.recent_purchases.length > 0 ? (
-                  <div className="space-y-3">
-                    {stats.recent_purchases.map((purchase) => (
-                      <div
-                        key={purchase.id}
-                        className="p-3 border border-[var(--color-border)] rounded-xl hover:bg-gray-50 transition-colors"
-                      >
-                        <div className="flex items-center justify-between mb-2">
-                          <div>
-                            <p className="text-sm font-semibold text-[var(--color-text)]">
-                              {purchase.username}
-                            </p>
-                            <p className="text-xs text-[var(--color-text-secondary)]">
-                              {new Date(purchase.timestamp).toLocaleDateString("ko-KR")}
-                            </p>
-                          </div>
-                          <span className="text-sm font-semibold text-[var(--color-primary)]">
-                            {formatAmount(purchase.total_amount ?? 0)}
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-1">
-                          {purchase.items.map((item, idx) => (
-                            <span
-                              key={idx}
-                              className="text-xs px-2 py-1 bg-orange-50 text-orange-700 rounded"
-                            >
-                              {item.name} × {item.count}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="h-40 rounded-xl border border-dashed border-[var(--color-border)] flex items-center justify-center text-sm text-[var(--color-text-secondary)]">
-                    아직 구매 내역이 없습니다.
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        ) : null}
-      </div>
-    );
-  }
-
-  // User HomePage
   return (
     <div className="p-4 md:p-6 lg:p-8 max-w-6xl mx-auto space-y-4 md:space-y-6 lg:space-y-8">
       {/* Real-time Best */}
