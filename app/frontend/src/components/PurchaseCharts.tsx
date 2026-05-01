@@ -63,7 +63,7 @@ export default function PurchaseCharts({ purchases }: Props) {
               tick={{ fontSize: 12 }}
             />
             <Tooltip
-              formatter={(value: number) => [`${value}개`, "구매 수량"]}
+              formatter={(value) => [`${Number(value)}개`, "구매 수량"]}
             />
             <Bar dataKey="count" fill="var(--color-primary)" radius={[0, 4, 4, 0]} />
           </BarChart>
@@ -88,8 +88,8 @@ export default function PurchaseCharts({ purchases }: Props) {
                 tickFormatter={(v: number) => `₩${(v / 1000).toFixed(0)}k`}
               />
               <Tooltip
-                formatter={(value: number) =>
-                  [`₩${value.toLocaleString("ko-KR")}`, "지출액"]
+                formatter={(value) =>
+                  [`₩${Number(value).toLocaleString("ko-KR")}`, "지출액"]
                 }
               />
               <Line
