@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Export ALL app tables from MySQL as a single seed file.
-# Covers: products, product_prices, users (excl. smoke-test accounts), purchase_history
+# Covers 5-table schema: products, product_prices, category_corner_map,
+# users (excl. smoke-test accounts), purchase_history
 #
 # Usage:
 #   ./db/export_full_seed.sh
@@ -20,7 +21,7 @@ INCLUDE_SMOKE="false"
 
 usage() {
     cat <<'EOF'
-Export EBRCS full DB seed (products, product_prices, users, purchase_history) from MySQL.
+Export EBRCS full DB seed from MySQL.
 
 Options:
   --output <path>     Output file path (.sql or .sql.gz). Default: db/seeds/full_seed_<timestamp>.sql.gz
@@ -53,6 +54,8 @@ fi
 
 if command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
+elif [ -x /opt/homebrew/bin/python3 ]; then
+    PYTHON_BIN="/opt/homebrew/bin/python3"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
 else
@@ -79,7 +82,7 @@ if [[ "$OUTPUT_FILE" != /* ]]; then
 fi
 
 # ── Parse DATABASE_URL from .env ──────────────────────────────────────────────
-parse_output="$(
+if ! parse_output="$(
 PROJECT_ROOT="$PROJECT_ROOT" "$PYTHON_BIN" - <<'PY'
 import os, sys
 from pathlib import Path
@@ -128,11 +131,18 @@ print(f"DB_USER={db_user}")
 print(f"DB_PASSWORD={db_password}")
 print(f"DB_NAME={db_name}")
 PY
-)"
+)"; then
+    exit 1
+fi
 
 while IFS= read -r line; do
     [ -n "$line" ] && export "$line"
 done <<< "$parse_output"
+
+: "${DB_HOST:?DATABASE_URL parse failed: DB_HOST is empty}"
+: "${DB_PORT:?DATABASE_URL parse failed: DB_PORT is empty}"
+: "${DB_USER:?DATABASE_URL parse failed: DB_USER is empty}"
+: "${DB_NAME:?DATABASE_URL parse failed: DB_NAME is empty}"
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 
@@ -193,13 +203,12 @@ fi
     printf '/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n'
     printf '/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='"'"'NO_AUTO_VALUE_ON_ZERO'"'"' */;\n\n'
 
-    # products → product_prices → product_discounts (FK dependency order)
-    MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" products product_prices product_discounts
+    # products → product_prices (FK dependency order)
+    MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" products product_prices
 
-    # store_corners → category_corner_map (FK dependency order)
     # setup_db.sh의 _seed_corner_mappings()는 products가 비어있을 때 실행되므로
-    # 시드 파일에 직접 포함해야 로컬에서도 코너 매핑이 정상 동작함
-    MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" store_corners category_corner_map
+    # 시드 파일에 직접 포함해야 로컬에서도 코너 매핑이 정상 동작함.
+    MYSQL_PWD="$DB_PASSWORD" "${dump_base[@]}" "$DB_NAME" category_corner_map
 
     # users (optional filter)
     if [ -n "$USERS_WHERE" ]; then
@@ -234,8 +243,6 @@ if [ "$USE_DOCKER_DUMP" = "true" ]; then
     "$DB_NAME" -e \
     "SELECT 'products' AS tbl, COUNT(*) AS cnt FROM products
      UNION ALL SELECT 'product_prices', COUNT(*) FROM product_prices
-     UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
-     UNION ALL SELECT 'store_corners', COUNT(*) FROM store_corners
      UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
      UNION ALL SELECT 'users (exported)', COUNT(*) FROM users$([ -n "$USERS_WHERE" ] && echo " WHERE $USERS_WHERE")
      UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history$([ -n "$USERS_WHERE" ] && echo " WHERE user_id IN (SELECT id FROM users WHERE $USERS_WHERE)");"
@@ -245,8 +252,6 @@ MYSQL_PWD="$DB_PASSWORD" mysql \
     "$DB_NAME" -e \
     "SELECT 'products' AS tbl, COUNT(*) AS cnt FROM products
      UNION ALL SELECT 'product_prices', COUNT(*) FROM product_prices
-     UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
-     UNION ALL SELECT 'store_corners', COUNT(*) FROM store_corners
      UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
      UNION ALL SELECT 'users (exported)', COUNT(*) FROM users$([ -n "$USERS_WHERE" ] && echo " WHERE $USERS_WHERE")
      UNION ALL SELECT 'purchase_history', COUNT(*) FROM purchase_history$([ -n "$USERS_WHERE" ] && echo " WHERE user_id IN (SELECT id FROM users WHERE $USERS_WHERE)");"

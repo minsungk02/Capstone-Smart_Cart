@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Import full DB seed (products, product_prices, product_discounts, users, purchase_history) into MySQL.
+# Import full DB seed into MySQL.
+# Covers 5-table schema: products, product_prices, category_corner_map,
+# users, purchase_history.
 #
 # Usage:
 #   ./db/import_full_seed.sh --seed ./db/seeds/full_seed_latest.sql.gz
@@ -22,13 +24,12 @@ Import EBRCS full DB seed into MySQL.
 Options:
   --seed <path>     Input seed file (.sql or .sql.gz).
   --append          Keep existing data and append imported rows.
-                    Default: truncates all 7 tables before importing.
+                    Default: truncates all 5 app tables before importing.
   --dry-run         Print resolved DB target and command without executing.
   -h, --help        Show this help.
 
 Tables affected (child → parent truncate order):
-  purchase_history, users, category_corner_map, store_corners,
-  product_discounts, product_prices, products
+  purchase_history, users, category_corner_map, product_prices, products
 EOF
 }
 
@@ -77,6 +78,8 @@ fi
 
 if command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
+elif [ -x /opt/homebrew/bin/python3 ]; then
+    PYTHON_BIN="/opt/homebrew/bin/python3"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
 else
@@ -88,7 +91,7 @@ if [[ "$SEED_FILE" == *.gz ]] && ! command -v gzip >/dev/null 2>&1; then
 fi
 
 # ── Parse DATABASE_URL from .env ──────────────────────────────────────────────
-parse_output="$(
+if ! parse_output="$(
 PROJECT_ROOT="$PROJECT_ROOT" "$PYTHON_BIN" - <<'PY'
 import os, sys
 from pathlib import Path
@@ -137,11 +140,18 @@ print(f"DB_USER={db_user}")
 print(f"DB_PASSWORD={db_password}")
 print(f"DB_NAME={db_name}")
 PY
-)"
+)"; then
+    exit 1
+fi
 
 while IFS= read -r line; do
     [ -n "$line" ] && export "$line"
 done <<< "$parse_output"
+
+: "${DB_HOST:?DATABASE_URL parse failed: DB_HOST is empty}"
+: "${DB_PORT:?DATABASE_URL parse failed: DB_PORT is empty}"
+: "${DB_USER:?DATABASE_URL parse failed: DB_USER is empty}"
+: "${DB_NAME:?DATABASE_URL parse failed: DB_NAME is empty}"
 
 if [ "$USE_DOCKER_MYSQL" = "true" ]; then
     mysql_cmd=(docker exec -i ebrcs-local-mysql mysql "-u$DB_USER" "-p$DB_PASSWORD")
@@ -158,7 +168,7 @@ if [ "$DRY_RUN" = "true" ]; then
     echo "Dry-run — would run:"
     echo "  1. CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`"
     if [ "$APPEND_MODE" != "true" ]; then
-        echo "  2. TRUNCATE purchase_history, users, product_discounts, product_prices, products"
+        echo "  2. TRUNCATE purchase_history, users, category_corner_map, product_prices, products"
     fi
     if [[ "$SEED_FILE" == *.gz ]]; then
         echo "  3. gzip -dc $SEED_FILE | mysql $DB_NAME"
@@ -186,11 +196,11 @@ required_count="$(
     run_mysql -Nse \
     "SELECT COUNT(*) FROM information_schema.tables
      WHERE table_schema='$DB_NAME'
-     AND table_name IN ('products','product_prices','product_discounts',
-                        'store_corners','category_corner_map','users','purchase_history');"
+     AND table_name IN ('products','product_prices','category_corner_map',
+                        'users','purchase_history');"
 )"
 
-if [ "${required_count:-0}" -lt 7 ]; then
+if [ "${required_count:-0}" -lt 5 ]; then
     echo "❌ Required tables are missing in $DB_NAME."
     echo "   Run: cd app && ./setup_db.sh"
     exit 1
@@ -204,8 +214,6 @@ if [ "$APPEND_MODE" != "true" ]; then
          TRUNCATE TABLE purchase_history;
          TRUNCATE TABLE users;
          TRUNCATE TABLE category_corner_map;
-         TRUNCATE TABLE store_corners;
-         TRUNCATE TABLE product_discounts;
          TRUNCATE TABLE product_prices;
          TRUNCATE TABLE products;
          SET FOREIGN_KEY_CHECKS=1;"
@@ -225,8 +233,6 @@ echo "Row counts after import:"
 run_mysql "$DB_NAME" -e \
     "SELECT 'products'           AS tbl, COUNT(*) AS cnt FROM products
      UNION ALL SELECT 'product_prices',    COUNT(*) FROM product_prices
-     UNION ALL SELECT 'product_discounts', COUNT(*) FROM product_discounts
-     UNION ALL SELECT 'store_corners',     COUNT(*) FROM store_corners
      UNION ALL SELECT 'category_corner_map', COUNT(*) FROM category_corner_map
      UNION ALL SELECT 'users',             COUNT(*) FROM users
      UNION ALL SELECT 'purchase_history',  COUNT(*) FROM purchase_history;"

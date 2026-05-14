@@ -255,11 +255,11 @@ EBRCS/
 │   ├── start_local_mysql.sh     # Docker MySQL 컨테이너 시작 (macOS/Linux)
 │   ├── start_local_mysql.bat    # Docker MySQL 컨테이너 시작 (Windows)
 │   ├── stop_local_mysql.sh      # Docker MySQL 컨테이너 종료
-│   ├── export_full_seed.sh      # EC2 → 시드 파일 내보내기 (7개 테이블)
+│   ├── export_full_seed.sh      # EC2 → 시드 파일 내보내기 (5개 테이블)
 │   ├── import_full_seed.sh      # 시드 파일 → 로컬 MySQL 가져오기
 │   ├── docker-compose.mysql.yml # 로컬 MySQL 컨테이너 설정
 │   ├── seeds/
-│   │   └── full_seed_latest.sql.gz  # 전체 DB 시드 (7개 테이블, gitignore)
+│   │   └── full_seed_latest.sql.gz  # 전체 DB 시드 (5개 테이블, gitignore)
 │   └── README.md
 │
 ├── nginx/                 # Nginx 리버스 프록시 설정
@@ -375,7 +375,7 @@ setup_all.bat
 ```
 Step 1/3  db/setup_local_db.sh(.bat)
           ├── Docker MySQL 컨테이너 기동 (port 3307)
-          ├── 스키마 bootstrap (7개 테이블)
+          ├── 스키마 bootstrap (5개 테이블)
           └── 시드 데이터 import (db/seeds/full_seed_latest.sql.gz)
 
 Step 2/3  setup_venv.sh(.bat)

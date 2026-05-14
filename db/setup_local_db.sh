@@ -49,7 +49,7 @@ if [ ! -f "$SEED_FILE" ]; then
     exit 0
 fi
 
-"$SCRIPT_DIR/import_full_seed.sh" --seed "$SEED_FILE" "${IMPORT_ARGS[@]}"
+"$SCRIPT_DIR/import_full_seed.sh" --seed "$SEED_FILE" "${IMPORT_ARGS[@]+"${IMPORT_ARGS[@]}"}"
 echo ""
 
 echo "================================================================"
