@@ -64,24 +64,33 @@ export default function CategoryDonut({ purchases }: CategoryDonutProps) {
   const r = 44;
   const cx = 90;
   const cy = 90;
-  let a0 = -Math.PI / 2;
 
-  const segs = segments.map((t, i) => {
-    const frac = t.v / grand;
-    const a1 = a0 + frac * Math.PI * 2;
-    const large = frac > 0.5 ? 1 : 0;
-    const x0 = cx + R * Math.cos(a0);
-    const y0 = cy + R * Math.sin(a0);
-    const x1 = cx + R * Math.cos(a1);
-    const y1 = cy + R * Math.sin(a1);
-    const xi0 = cx + r * Math.cos(a0);
-    const yi0 = cy + r * Math.sin(a0);
-    const xi1 = cx + r * Math.cos(a1);
-    const yi1 = cy + r * Math.sin(a1);
-    const path = `M ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} L ${xi1} ${yi1} A ${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`;
-    a0 = a1;
-    return { path, cat: t.cat, v: t.v, frac, color: COLORS[i % COLORS.length] };
-  });
+  const segs = segments.reduce<{
+    endAngle: number;
+    items: Array<{ path: string; cat: string; v: number; frac: number; color: string }>;
+  }>(
+    (acc, t, i) => {
+      const startAngle = acc.endAngle;
+      const frac = t.v / grand;
+      const endAngle = startAngle + frac * Math.PI * 2;
+      const large = frac > 0.5 ? 1 : 0;
+      const x0 = cx + R * Math.cos(startAngle);
+      const y0 = cy + R * Math.sin(startAngle);
+      const x1 = cx + R * Math.cos(endAngle);
+      const y1 = cy + R * Math.sin(endAngle);
+      const xi0 = cx + r * Math.cos(startAngle);
+      const yi0 = cy + r * Math.sin(startAngle);
+      const xi1 = cx + r * Math.cos(endAngle);
+      const yi1 = cy + r * Math.sin(endAngle);
+      const path = `M ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} L ${xi1} ${yi1} A ${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`;
+
+      return {
+        endAngle,
+        items: [...acc.items, { path, cat: t.cat, v: t.v, frac, color: COLORS[i % COLORS.length] }],
+      };
+    },
+    { endAngle: -Math.PI / 2, items: [] },
+  ).items;
 
   return (
     <div className="bg-white border border-[var(--color-border)] rounded-2xl p-6 shadow-sm">

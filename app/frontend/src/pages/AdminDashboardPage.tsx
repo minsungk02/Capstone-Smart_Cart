@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "../stores/authStore";
 import {
@@ -15,8 +15,7 @@ import DiscountPanel from "../components/admin/DiscountPanel";
 import CategoryDonut from "../components/admin/CategoryDonut";
 import RecentFeed from "../components/admin/RecentFeed";
 
-const PERIOD_OPTIONS = [7, 14, 30] as const;
-type PeriodDays = (typeof PERIOD_OPTIONS)[number];
+type PeriodDays = 7 | 14 | 30;
 
 export default function AdminDashboardPage() {
   const { token } = useAuthStore();
@@ -36,21 +35,15 @@ export default function AdminDashboardPage() {
     enabled: !!token,
   });
 
-  const { data: discountProducts = [], isLoading: isDiscountLoading } = useQuery({
-    queryKey: ["discount-products", "admin-dashboard", token, discountCategory],
-    queryFn: () => getDiscountProducts(token!, discountCategory, 5),
-    enabled: !!token && discountCategory.length > 0,
-  });
+  const activeDiscountCategory = discountCategories.includes(discountCategory)
+    ? discountCategory
+    : discountCategories[0] ?? "";
 
-  useEffect(() => {
-    if (discountCategories.length === 0) {
-      if (discountCategory !== "") setDiscountCategory("");
-      return;
-    }
-    if (!discountCategories.includes(discountCategory)) {
-      setDiscountCategory(discountCategories[0]);
-    }
-  }, [discountCategories, discountCategory]);
+  const { data: discountProducts = [], isLoading: isDiscountLoading } = useQuery({
+    queryKey: ["discount-products", "admin-dashboard", token, activeDiscountCategory],
+    queryFn: () => getDiscountProducts(token!, activeDiscountCategory, 5),
+    enabled: !!token && activeDiscountCategory.length > 0,
+  });
 
   const periodLabel = `최근 ${periodDays}일`;
 
@@ -91,7 +84,7 @@ export default function AdminDashboardPage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             <DiscountPanel
               categories={discountCategories}
-              selectedCategory={discountCategory}
+              selectedCategory={activeDiscountCategory}
               onCategoryChange={setDiscountCategory}
               items={discountProducts}
               isLoading={isDiscountLoading}

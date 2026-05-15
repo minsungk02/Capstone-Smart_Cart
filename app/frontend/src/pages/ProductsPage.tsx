@@ -226,7 +226,7 @@ export default function ProductsPage() {
       }
       setCameraActive(true);
       await loadDevices();
-    } catch (err) {
+    } catch {
       setCameraError("카메라 접근에 실패했습니다. 권한과 HTTPS를 확인해주세요.");
       setCameraActive(false);
     } finally {

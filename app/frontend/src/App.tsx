@@ -36,9 +36,8 @@ export default function App() {
 
   const { user, clearAuth, isAuthenticated, isAdmin } = useAuthStore();
   const isAdminUser = isAdmin();
-  const shouldRenderChatbot = true;
-  // Checkout page renders its own sheet-aware FAB; everywhere else uses the standard FAB.
-  const hideChatbotFab = isCheckoutPage;
+  const shouldRenderChatbot = !isAdminUser;
+  const shouldShowHeaderChatbot = shouldRenderChatbot && !isCheckoutPage;
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const isChatbotOpen = useUIStore((s) => s.isChatbotOpen);
   const setChatbotOpen = useUIStore((s) => s.setChatbotOpen);
@@ -95,8 +94,14 @@ export default function App() {
 
   // Reset transient overlays when route changes to avoid mobile transition glitches.
   useEffect(() => {
-    setIsProfileMenuOpen(false);
-    setChatbotOpen(false);
+    const frameId = window.requestAnimationFrame(() => {
+      setIsProfileMenuOpen(false);
+      setChatbotOpen(false);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
   }, [pathname, setChatbotOpen]);
 
   // Match the iOS rubber-band flash color to the route's dominant surface.
@@ -227,10 +232,28 @@ export default function App() {
 
             {/* Profile Menu Button */}
             <div className="flex items-center gap-2">
+              {shouldShowHeaderChatbot && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsProfileMenuOpen(false);
+                    setChatbotOpen(!isChatbotOpen);
+                  }}
+                  className="w-9 h-9 rounded-full text-white text-lg flex items-center justify-center shadow-md border border-white/30"
+                  style={{
+                    background: "linear-gradient(135deg, #fb923c, #f97316)",
+                    boxShadow:
+                      "0 8px 18px rgba(249,115,22,0.28), 0 0 0 3px rgba(249,115,22,0.08)",
+                  }}
+                  aria-label={isChatbotOpen ? "챗봇 닫기" : "챗봇 열기"}
+                >
+                  {isChatbotOpen ? "✕" : "🤖"}
+                </button>
+              )}
               <div className="relative" ref={profileMenuRef}>
                 <button
                   onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
-                  className="w-8 h-8 rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)] flex items-center justify-center font-semibold text-sm"
+                  className="w-9 h-9 rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)] flex items-center justify-center font-semibold text-sm"
                 >
                   {user?.name?.[0] || "U"}
                 </button>
@@ -318,7 +341,8 @@ export default function App() {
         <ChatbotWidget
           open={isChatbotOpen}
           onOpenChange={setChatbotOpen}
-          hideMobileTrigger={hideChatbotFab}
+          hideMobileTrigger
+          mobilePanelPlacement={shouldShowHeaderChatbot ? "header" : "floating"}
         />
       )}
     </div>

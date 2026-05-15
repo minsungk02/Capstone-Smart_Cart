@@ -44,8 +44,10 @@ SYSTEM_PROMPT = """\
 3. 가격 미등록 상품은 "가격 정보가 아직 등록되지 않았습니다"라고 안내하세요.
 4. 금액에는 항상 쉼표와 '원' 단위를 붙여주세요 (예: 1,500원).
 5. 답변은 간결하되 필요한 정보는 빠짐없이 포함하세요.
-6. 여러 상품을 비교할 때는 번호 목록을 사용하세요.
-7. 이전 대화 맥락을 참고하되, 새 질문의 의도가 명확하면 그에 집중하세요.
+6. 마크다운 문법을 쓰지 마세요. **굵게**, * 불릿, 제목 문법을 금지합니다.
+7. 여러 상품을 비교할 때는 '• 상품명 - 핵심 정보' 형식만 사용하세요.
+8. 고객에게 바로 도움이 되는 답부터 말하고, 필요할 때만 취향 질문을 한 문장 덧붙이세요.
+9. 이전 대화 맥락을 참고하되, 새 질문의 의도가 명확하면 그에 집중하세요.
 
 ## 도구(tool) 사용
 - 상품 검색, 상세 조회, 매장 위치 조회 도구가 제공됩니다.
@@ -60,6 +62,8 @@ SYSTEM_PROMPT_LOCAL = """\
 DB에 없는 정보는 "해당 정보가 없습니다"라고 답하세요.
 금액은 쉼표와 원 단위를 사용하세요 (예: 1,500원).
 상품명에 포함된 브랜드, 중량 정보도 함께 안내하세요.
+마크다운 문법(**, *, #)과 이모지는 사용하지 마세요.
+목록은 '• 상품명 - 핵심 정보' 형식만 사용하세요.
 """
 
 # ---------------------------------------------------------------------------
@@ -515,7 +519,9 @@ _CATALOG_STOPWORDS = {
     "주세요",
 }
 _DISCOUNT_QUERY_TOKENS = ("할인", "세일", "할인율", "할인가")
+_DISCOUNT_RANK_TOKENS = ("제일", "가장", "큰", "높은", "최고", "1위", "순위", "랭킹")
 _PRICE_QUERY_TOKENS = ("가격", "비싼", "저렴", "최고가", "최저가", "금액", "얼마")
+_CART_TOTAL_QUERY_TOKENS = ("총액", "총 금액", "총금액", "합계", "전체 금액", "결제 금액")
 _LOCATION_QUERY_TOKENS = (
     "위치",
     "어디",
@@ -596,6 +602,40 @@ def _json_for_prompt(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str, indent=2)
     except Exception:
         return str(value)
+
+
+def _format_won(value: Any) -> str | None:
+    try:
+        return f"{int(float(value)):,}원"
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_percent(value: Any) -> str | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric.is_integer():
+        return f"{int(numeric)}%"
+    return f"{numeric:.1f}%"
+
+
+def _sanitize_chatbot_answer(answer: str) -> str:
+    text_value = str(answer or "").strip()
+    if not text_value:
+        return text_value
+
+    text_value = re.sub(r"\*\*(.*?)\*\*", r"\1", text_value)
+    text_value = re.sub(r"__(.*?)__", r"\1", text_value)
+    text_value = text_value.replace("**", "").replace("__", "")
+    text_value = re.sub(r"(?m)^\s*[*-]\s+", "• ", text_value)
+    text_value = re.sub(r"(?m)^\s*\d+[.)]\s+", "• ", text_value)
+    text_value = re.sub(r"(?m)^\s*#{1,6}\s*", "", text_value)
+    text_value = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", text_value)
+    text_value = re.sub(r"[ \t]+\n", "\n", text_value)
+    text_value = re.sub(r"\n{3,}", "\n\n", text_value)
+    return text_value.strip()
 
 
 def _table_columns(db: Session, table_name: str) -> list[str]:
@@ -1829,6 +1869,307 @@ def _answer_nutrition_direct(question: str, catalog_context: dict[str, Any] | No
     return f"{fallback_product}의 {', '.join(requested_nutrients)} 정보는 현재 DB에서 확인되지 않습니다."
 
 
+def _is_discount_query(question: str) -> bool:
+    return any(token in (question or "") for token in _DISCOUNT_QUERY_TOKENS)
+
+
+def _is_cart_total_query(question: str) -> bool:
+    compact = re.sub(r"\s+", "", question or "")
+    if any(re.sub(r"\s+", "", token) in compact for token in _CART_TOTAL_QUERY_TOKENS):
+        return True
+    if "총" in compact and any(token in compact for token in ("얼마", "금액", "가격")):
+        return True
+    return "장바구니" in compact and any(token in compact for token in ("얼마", "금액", "총", "합계"))
+
+
+def _answer_cart_total_direct(
+    question: str,
+    products: list[ProductMeta],
+    total: dict[str, Any],
+) -> str | None:
+    if not _is_cart_total_query(question):
+        return None
+    if not products:
+        return "현재 장바구니가 비어 있습니다."
+
+    lines = [
+        f"현재 장바구니 총 금액은 {total['total_price']:,}원입니다.",
+        f"총 {total['total_count']}개 상품이 담겨 있어요.",
+    ]
+    unpriced = total.get("unpriced_items") or []
+    if unpriced:
+        lines.append(f"가격 미등록 상품은 {len(unpriced)}개라 총액에서 제외했습니다.")
+    return "\n".join(lines)
+
+
+def _known_category_values(db: Session, product_columns: list[str]) -> list[str]:
+    category_cols = [col for col in ("category_l", "category_m", "category_s", "category") if col in product_columns]
+    if not category_cols:
+        return []
+
+    categories: set[str] = set()
+    for col in category_cols:
+        try:
+            rows = db.execute(
+                text(
+                    f"SELECT DISTINCT `{col}` AS category "
+                    "FROM products "
+                    f"WHERE `{col}` IS NOT NULL AND TRIM(`{col}`) <> ''"
+                )
+            ).mappings().all()
+        except SQLAlchemyError:
+            continue
+        for row in rows:
+            category = str(row.get("category") or "").strip()
+            if category:
+                categories.add(category)
+    return sorted(categories, key=len, reverse=True)
+
+
+def _extract_category_from_question(db: Session, question: str, product_columns: list[str]) -> str:
+    normalized_question = _normalize_query_token(question)
+    if not normalized_question:
+        return ""
+
+    for category in _known_category_values(db, product_columns):
+        normalized_category = _normalize_query_token(category)
+        if normalized_category and normalized_category in normalized_question:
+            return category
+
+    stopwords = {
+        "할인중",
+        "할인율",
+        "할인",
+        "세일",
+        "상품",
+        "제품",
+        "제일",
+        "가장",
+        "큰",
+        "높은",
+        "최고",
+        "뭐야",
+        "어떤",
+        "알려줘",
+        "찾아줘",
+    }
+    for term in _extract_catalog_terms(question, limit=4):
+        normalized = _normalize_query_token(term)
+        if normalized and normalized not in {_normalize_query_token(token) for token in stopwords}:
+            return term
+    return ""
+
+
+def _discount_ranking_rows(db: Session, category: str = "", limit: int = 5) -> list[dict[str, Any]]:
+    product_columns = _table_columns(db, "products")
+    price_columns = _table_columns(db, "product_prices")
+    if not product_columns or not price_columns:
+        return []
+    if not {"id", "item_no", "product_name"}.issubset(set(product_columns)):
+        return []
+    if not {"id", "product_id", "is_discounted"}.issubset(set(price_columns)):
+        return []
+
+    select_cols = [
+        "p.`item_no` AS item_no",
+        "p.`product_name` AS product_name",
+    ]
+    for col in ("category_l", "category_m", "category_s"):
+        if col in product_columns:
+            select_cols.append(f"p.`{col}` AS {col}")
+    if "price" in price_columns:
+        select_cols.append("pp.`price` AS price")
+    if "discount_rate" in price_columns:
+        select_cols.append("pp.`discount_rate` AS discount_rate")
+    if "discount_amount" in price_columns:
+        select_cols.append("pp.`discount_amount` AS discount_amount")
+
+    where_parts = [
+        "pp.`is_discounted` = 1",
+        "pp.`id` = ("
+        "SELECT pp2.`id` FROM product_prices pp2 "
+        "WHERE pp2.`product_id` = p.`id` "
+        "ORDER BY pp2.`checked_at` DESC, pp2.`id` DESC LIMIT 1"
+        ")",
+    ]
+    params: dict[str, Any] = {"limit": max(1, min(limit, 20))}
+
+    if category:
+        params["cat_kw"] = f"%{category}%"
+        cat_clauses = ["p.`product_name` LIKE :cat_kw"]
+        for col in ("category_l", "category_m", "category_s"):
+            if col in product_columns:
+                cat_clauses.append(f"p.`{col}` LIKE :cat_kw")
+        where_parts.append("(" + " OR ".join(cat_clauses) + ")")
+
+    order_terms: list[str] = []
+    if "discount_rate" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_rate`, 0) DESC")
+    if "discount_amount" in price_columns:
+        order_terms.append("COALESCE(pp.`discount_amount`, 0) ASC")
+    order_terms.append("p.`product_name` ASC")
+
+    sql = (
+        f"SELECT {', '.join(select_cols)} "
+        "FROM products p "
+        "JOIN product_prices pp ON pp.`product_id` = p.`id` "
+        f"WHERE {' AND '.join(where_parts)} "
+        f"ORDER BY {', '.join(order_terms)} "
+        "LIMIT :limit"
+    )
+    try:
+        rows = db.execute(text(sql), params).mappings().all()
+    except SQLAlchemyError:
+        return []
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        item_no = str(row.get("item_no") or "").strip()
+        product_name = str(row.get("product_name") or "").strip()
+        key = item_no or product_name
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        results.append({k: v for k, v in dict(row).items() if v is not None})
+    return results
+
+
+def _discount_line(row: dict[str, Any]) -> str:
+    name = str(row.get("product_name") or "상품명 없음").strip()
+    rate = _format_percent(row.get("discount_rate"))
+    price = _format_won(row.get("price"))
+    sale_price = _format_won(row.get("discount_amount"))
+
+    details: list[str] = []
+    if rate:
+        details.append(f"{rate} 할인")
+    if price:
+        details.append(f"가격 {price}")
+    if sale_price:
+        details.append(f"할인가 {sale_price}")
+    return f"{name} - {', '.join(details)}" if details else name
+
+
+def _preference_followup(category: str) -> str:
+    if "과자" in category:
+        return "단맛, 고소한맛, 짭짤한맛 중에 어떤 쪽이 좋으세요?"
+    if "음료" in category:
+        return "탄산, 주스, 차 음료 중에 어떤 쪽을 찾으세요?"
+    if "면" in category:
+        return "매운맛, 순한맛, 컵라면 중에 어떤 쪽이 좋으세요?"
+    return "원하시는 맛이나 가격대가 있으면 이어서 추천해드릴게요."
+
+
+def _answer_discount_direct(question: str, db: Session) -> str | None:
+    if not _is_discount_query(question):
+        return None
+
+    product_columns = _table_columns(db, "products")
+    category = _extract_category_from_question(db, question, product_columns)
+    rows = _discount_ranking_rows(db, category=category, limit=5)
+    scope = f"{category}에서 " if category else "현재 "
+    if not rows:
+        return f"{scope}할인 중인 상품을 찾지 못했습니다."
+
+    wants_top = any(token in (question or "") for token in _DISCOUNT_RANK_TOKENS)
+    if wants_top:
+        top = rows[0]
+        name = str(top.get("product_name") or "상품명 없음").strip()
+        lines = [f"{scope}할인율이 가장 큰 상품은 {name}예요."]
+        rate = _format_percent(top.get("discount_rate"))
+        price = _format_won(top.get("price"))
+        sale_price = _format_won(top.get("discount_amount"))
+        if rate:
+            lines.append(f"• 할인율: {rate}")
+        if price:
+            lines.append(f"• 가격: {price}")
+        if sale_price:
+            lines.append(f"• 할인가: {sale_price}")
+        lines.append(_preference_followup(category))
+        return "\n".join(lines)
+
+    lines = [f"{scope}할인 중인 상품이에요."]
+    for row in rows[:3]:
+        lines.append(f"• {_discount_line(row)}")
+    lines.append(_preference_followup(category))
+    return "\n".join(lines)
+
+
+def _answer_price_direct(question: str, catalog_context: dict[str, Any] | None) -> str | None:
+    if not any(token in (question or "") for token in _PRICE_QUERY_TOKENS):
+        return None
+    if _is_cart_total_query(question):
+        return None
+    if not catalog_context or not catalog_context.get("available"):
+        return None
+
+    raw_products = catalog_context.get("matched_products")
+    if not isinstance(raw_products, list):
+        return None
+    products = [row for row in raw_products if isinstance(row, dict)]
+    if not products:
+        return "질문하신 상품을 찾지 못했습니다."
+
+    raw_terms = catalog_context.get("search_terms")
+    terms = raw_terms if isinstance(raw_terms, list) else _extract_catalog_terms(question, limit=6)
+    products = sorted(products, key=lambda row: _product_match_score(row, terms), reverse=True)
+    priced = [row for row in products if row.get("latest_price") is not None]
+    if not priced:
+        return "가격 정보가 아직 등록되지 않았습니다."
+
+    if len(priced) == 1:
+        row = priced[0]
+        name = str(row.get("product_name") or "해당 상품").strip()
+        price = _format_won(row.get("latest_price")) or "가격 미등록"
+        return f"{name} 가격은 {price}입니다."
+
+    lines = ["확인된 상품 가격입니다."]
+    for row in priced[:3]:
+        name = str(row.get("product_name") or "해당 상품").strip()
+        price = _format_won(row.get("latest_price")) or "가격 미등록"
+        lines.append(f"• {name} - {price}")
+    return "\n".join(lines)
+
+
+def _answer_direct_shopping_question(
+    question: str,
+    products: list[ProductMeta],
+    total: dict[str, Any],
+    db: Session,
+) -> str | None:
+    cart_answer = _answer_cart_total_direct(question, products, total)
+    if cart_answer:
+        return cart_answer
+
+    discount_answer = _answer_discount_direct(question, db)
+    if discount_answer:
+        return discount_answer
+
+    needs_catalog_context = (
+        _is_location_query(question)
+        or any(token in (question or "") for token in _NUTRITION_QUERY_TOKENS)
+        or any(token in (question or "") for token in _PRICE_QUERY_TOKENS)
+    )
+    if not needs_catalog_context:
+        return None
+
+    catalog_context = _build_catalog_context(db, question)
+    location_answer = _answer_corner_location_direct(question, catalog_context)
+    if location_answer:
+        return location_answer
+
+    nutrition_answer = _answer_nutrition_direct(question, catalog_context)
+    if nutrition_answer:
+        return nutrition_answer
+
+    price_answer = _answer_price_direct(question, catalog_context)
+    if price_answer:
+        return price_answer
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tool Use: tool definitions + execution helpers
 # ---------------------------------------------------------------------------
@@ -2116,70 +2457,7 @@ def _tool_get_discount_ranking(
     limit: int = 5,
 ) -> str:
     """get_discount_ranking tool: 할인율 높은 상품 조회."""
-    product_columns = _table_columns(db, "products")
-    price_columns = _table_columns(db, "product_prices")
-    if not product_columns or not price_columns:
-        return json.dumps({"results": []}, ensure_ascii=False)
-
-    required = {"id", "item_no", "product_name"}
-    if not required.issubset(set(product_columns)):
-        return json.dumps({"results": []}, ensure_ascii=False)
-    if not {"id", "product_id", "is_discounted"}.issubset(set(price_columns)):
-        return json.dumps({"results": []}, ensure_ascii=False)
-
-    select_cols = ["p.`item_no`", "p.`product_name`"]
-    if "category_l" in product_columns:
-        select_cols.append("p.`category_l`")
-    if "discount_rate" in price_columns:
-        select_cols.append("pp.`discount_rate`")
-    if "discount_amount" in price_columns:
-        select_cols.append("pp.`discount_amount`")
-    if "price" in price_columns:
-        select_cols.append("pp.`price`")
-
-    where_parts = ["pp.`is_discounted` = 1"]
-    params: dict[str, Any] = {"limit": max(1, min(limit, 20))}
-
-    if category:
-        cat_clauses = []
-        params["cat_kw"] = f"%{category}%"
-        for col in ("category_l", "category_m", "category_s"):
-            if col in product_columns:
-                cat_clauses.append(f"p.`{col}` LIKE :cat_kw")
-        if cat_clauses:
-            where_parts.append("(" + " OR ".join(cat_clauses) + ")")
-
-    order_terms: list[str] = []
-    if "discount_rate" in price_columns:
-        order_terms.append("COALESCE(pp.`discount_rate`, 0) DESC")
-    if "discount_amount" in price_columns:
-        order_terms.append("COALESCE(pp.`discount_amount`, 0) DESC")
-    order_terms.append("p.`id` DESC")
-
-    sql = (
-        f"SELECT {', '.join(select_cols)} "
-        "FROM products p "
-        "JOIN product_prices pp ON pp.`product_id` = p.`id` "
-        f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY {', '.join(order_terms)} "
-        "LIMIT :limit"
-    )
-    try:
-        rows = db.execute(text(sql), params).mappings().all()
-    except SQLAlchemyError:
-        return json.dumps({"results": []}, ensure_ascii=False)
-
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in rows:
-        item_no = str(row.get("item_no") or "").strip()
-        if item_no and item_no in seen:
-            continue
-        if item_no:
-            seen.add(item_no)
-        entry: dict[str, Any] = {k: v for k, v in dict(row).items() if v is not None}
-        results.append(entry)
-
+    results = _discount_ranking_rows(db, category=category, limit=limit)
     return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False, default=str)
 
 
@@ -2428,7 +2706,7 @@ def _answer_question(
         if not tool_calls:
             content = msg.get("content", "")
             if content and str(content).strip():
-                return str(content).strip()
+                return _sanitize_chatbot_answer(str(content))
             raise RuntimeError("empty_response")
 
         # Tool Use 루프
@@ -2454,7 +2732,7 @@ def _answer_question(
             tool_calls = msg.get("tool_calls")
             if not tool_calls:
                 content = msg.get("content", "")
-                return str(content).strip() or "답변을 생성하지 못했습니다."
+                return _sanitize_chatbot_answer(str(content)) or "답변을 생성하지 못했습니다."
 
             messages.append(msg)
             for tc in tool_calls:
@@ -2472,7 +2750,7 @@ def _answer_question(
 
         for m in reversed(messages):
             if m.get("role") == "assistant" and m.get("content"):
-                return str(m["content"]).strip()
+                return _sanitize_chatbot_answer(str(m["content"]))
         return "도구 호출이 반복되어 답변을 완료하지 못했습니다."
 
     except Exception as tool_err:
@@ -2536,11 +2814,11 @@ def _answer_question_with_context(
     try:
         data = _call_llm(messages, tools=None)
         content = data["choices"][0]["message"].get("content", "")
-        return str(content).strip() or "답변을 생성하지 못했습니다."
+        return _sanitize_chatbot_answer(str(content)) or "답변을 생성하지 못했습니다."
     except RuntimeError as e:
-        return str(e)
+        return _sanitize_chatbot_answer(str(e))
     except Exception as e:
-        return f"LLM 호출 오류: {e}"
+        return _sanitize_chatbot_answer(f"LLM 호출 오류: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -2767,9 +3045,15 @@ async def query_chatbot(req: ChatbotRequest, db: Session = Depends(get_db)):
             f"현재 총 수량은 {total['total_count']}개이고 총 금액은 {total['total_price']:,}원입니다."
         )
     else:
-        # Phase 2: Tool Use 기반 에이전틱 호출 (catalog_context 사전 빌드 불필요)
-        chat_history = session.state.get("chatbot_history", []) if req.session_id and session else []
-        answer = _answer_question(req.question, products, total, db, chat_history)
+        direct_answer = _answer_direct_shopping_question(req.question, products, total, db)
+        if direct_answer:
+            answer = direct_answer
+        else:
+            # Phase 2: Tool Use 기반 에이전틱 호출 (catalog_context 사전 빌드 불필요)
+            chat_history = session.state.get("chatbot_history", []) if req.session_id and session else []
+            answer = _answer_question(req.question, products, total, db, chat_history)
+
+    answer = _sanitize_chatbot_answer(answer)
 
     # 대화 히스토리 갱신 (cart action이 아닌 LLM 호출 시에만)
     if req.session_id and session and not cart_update:

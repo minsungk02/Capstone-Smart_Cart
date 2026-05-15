@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { getChatbotSuggestions, queryChatbot } from "../api/chatbot";
 import { getBilling } from "../api/checkout";
 import { useSessionStore } from "../stores/sessionStore";
@@ -58,13 +59,33 @@ const getDefaultDesktopPos = () => ({
   y: Math.max(8, window.innerHeight - DESKTOP_FAB_SIZE - DESKTOP_BOTTOM_OFFSET),
 });
 
+const formatMessageText = (text: string) =>
+  text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/^\s*\d+[.)]\s+/gm, "• ")
+    .replace(/^\s*#{1,6}\s*/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
 interface ChatbotWidgetProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
   hideMobileTrigger?: boolean;
+  mobilePanelPlacement?: "floating" | "header";
 }
 
-export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hideMobileTrigger = false }: ChatbotWidgetProps) {
+export default function ChatbotWidget({
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
+  hideMobileTrigger = false,
+  mobilePanelPlacement = "floating",
+}: ChatbotWidgetProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const createSession = useSessionStore((s) => s.createSession);
   const billingItems = useSessionStore((s) => s.billingItems);
@@ -101,7 +122,7 @@ export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hide
   const scrollRef = useRef<HTMLDivElement>(null);
   const isOpenControlled = controlledOpen !== undefined;
   const open = isOpenControlled ? controlledOpen : internalOpen;
-  const shouldShowTrigger = !(hideMobileTrigger && isMobileView);
+  const shouldShowTrigger = !hideTrigger && !(hideMobileTrigger && isMobileView);
 
   const setOpen = useCallback((nextOpen: boolean | ((prevOpen: boolean) => boolean)) => {
     const resolvedOpen = typeof nextOpen === "function" ? nextOpen(open) : nextOpen;
@@ -309,6 +330,10 @@ export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hide
   const panelY = pos.y + fabSize + 8;
   const flipUp = panelY + panelH > window.innerHeight;
   const finalPanelY = flipUp ? Math.max(8, pos.y - panelH - 8) : panelY;
+  const isHeaderMobilePanel = mobilePanelPlacement === "header" && isMobileView;
+  const panelStyle: CSSProperties = isHeaderMobilePanel
+    ? { right: 8, top: "calc(env(safe-area-inset-top, 0px) + 64px)" }
+    : { left: Math.max(8, panelX), top: finalPanelY };
 
   return (
     <>
@@ -337,8 +362,10 @@ export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hide
       {/* Chat panel */}
       {open && (
         <div
-          style={{ left: Math.max(8, panelX), top: finalPanelY }}
-          className="fixed z-30 w-[min(92vw,360px)] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl shadow-xl overflow-hidden"
+          style={panelStyle}
+          className={`fixed w-[min(92vw,360px)] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl shadow-xl overflow-hidden ${
+            isHeaderMobilePanel ? "z-50" : "z-30"
+          }`}
         >
           <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-primary-light)] flex items-start justify-between gap-3">
             <div>
@@ -373,7 +400,7 @@ export default function ChatbotWidget({ open: controlledOpen, onOpenChange, hide
                     : "bg-white text-[var(--color-text)] border border-[var(--color-border)]"
                 }`}
               >
-                {msg.text}
+                {formatMessageText(msg.text)}
               </div>
             ))}
             {loading && (

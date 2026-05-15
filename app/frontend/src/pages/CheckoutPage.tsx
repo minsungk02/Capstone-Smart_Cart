@@ -387,6 +387,23 @@ export default function CheckoutPage() {
   }, [sessionId, billingSignature, setBillingState]);
 
   // --- Camera mode ---
+  const stopCamera = useCallback(() => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    videoTrackRef.current = null;
+    cancelAnimationFrame(captureAnimRef.current);
+    cancelAnimationFrame(renderAnimRef.current);
+    setConnected(false);
+    setIsLoading(false);
+    setLoadingMessage("");
+    setGuideOpen(false);
+    setGuideStep(0);
+    setCameraSettingsOpen(false);
+    setZoomSupported(false);
+  }, []);
+
   const startCamera = useCallback(async (forcedDeviceId?: string) => {
     try {
       // Start loading state
@@ -725,25 +742,9 @@ export default function CheckoutPage() {
     initZoomCapabilities,
     refreshCameraDevices,
     selectedCameraId,
+    stopCamera,
     updateFromWsMessage,
   ]);
-
-  const stopCamera = useCallback(() => {
-    wsRef.current?.close();
-    wsRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    videoTrackRef.current = null;
-    cancelAnimationFrame(captureAnimRef.current);
-    cancelAnimationFrame(renderAnimRef.current);
-    setConnected(false);
-    setIsLoading(false);
-    setLoadingMessage("");
-    setGuideOpen(false);
-    setGuideStep(0);
-    setCameraSettingsOpen(false);
-    setZoomSupported(false);
-  }, []);
 
   const handleCameraDeviceChange = useCallback(async (deviceId: string) => {
     setSelectedCameraId(deviceId);
